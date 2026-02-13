@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "description": "Filesystem access for hestia-OS project",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/velvetm/Desktop/hestia-OS"],
+      "requires_path": false
+    }
+  ]
+}
