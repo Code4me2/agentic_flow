@@ -1,10 +1,13 @@
 #!/bin/bash
-# Launch script for the Local A2A + MCP Agent Stack v2
+# Launch script for the Local A2A + MCP Agent Stack
 #
 # Architecture (ADK-Free):
 #   Manager (Ollama) → A2A Protocol → Bridge(s) → Ollama (native MCP)
 #
-# No Google ADK dependencies - pure Python with httpx/FastAPI.
+# Features:
+#   - Async task delegation with push notifications
+#   - Turn-boundary result injection
+#   - HMAC-signed webhooks
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -47,51 +50,37 @@ activate_venv() {
     source .venv/bin/activate
 }
 
-# Start the A2A-Ollama bridge v2 for coder agent
+# Start the A2A-Ollama bridge for coder agent
 start_coder_bridge() {
-    log_info "Starting Coder Bridge v2 (qwen3-coder) on port 8002..."
+    log_info "Starting Coder Bridge (qwen3-coder) on port 8002..."
     activate_venv
     BRIDGE_PORT=8002 \
     BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
     AGENT_NAME="LocalCoder" \
     AGENT_DESCRIPTION="Code generation agent with filesystem access via native MCP" \
     TOOLS_PATH="/home/velvetm/Desktop" \
-    python a2a_ollama_bridge_v2.py
-}
-
-# Start v1 bridge (legacy)
-start_coder_bridge_v1() {
-    log_info "Starting Coder Bridge v1 (legacy) on port 8002..."
-    activate_venv
-    BRIDGE_PORT=8002 BRIDGE_MODEL="qwen3-coder-tools:latest" python a2a_ollama_bridge.py
+    python a2a_ollama_bridge.py
 }
 
 # Start the A2A-Ollama bridge for worker agent
 start_worker_bridge() {
-    log_info "Starting Worker Bridge v2 (nemotron-3-nano) on port 8001..."
+    log_info "Starting Worker Bridge (nemotron-3-nano) on port 8001..."
     activate_venv
     BRIDGE_PORT=8001 \
     BRIDGE_MODEL="nemotron-3-nano:30b" \
     AGENT_NAME="LocalWorker" \
     AGENT_DESCRIPTION="General purpose reasoning and task execution agent" \
-    python a2a_ollama_bridge_v2.py
+    python a2a_ollama_bridge.py
 }
 
-# Start the ADK-free manager CLI
+# Start the manager CLI
 start_manager() {
-    log_info "Starting Manager Agent v2 (ADK-free)..."
+    log_info "Starting Manager Agent..."
     activate_venv
     WORKER_URLS="http://localhost:8001,http://localhost:8002" \
     MANAGER_MODEL="llama3.3:70b" \
     TOOLS_PATH="/home/velvetm/Desktop" \
-    python manager_agent_v2.py
-}
-
-# Start legacy ADK manager (if needed)
-start_manager_legacy() {
-    log_info "Starting Legacy Manager (ADK) on port 8000..."
-    activate_venv
-    adk web --port 8000
+    python manager_agent.py
 }
 
 # Test worker discovery
@@ -107,13 +96,13 @@ test_discovery() {
     curl -s http://localhost:8002/.well-known/agent.json | python -m json.tool 2>/dev/null || log_warn "Coder not available"
 }
 
-# Start all v2 components
+# Start all components
 start_all() {
     check_prereqs || exit 1
 
     echo ""
     echo "=========================================="
-    echo "  Local A2A Agent Stack v2 (ADK-Free)"
+    echo "  Local A2A Agent Stack (ADK-Free)"
     echo "=========================================="
     echo ""
 
@@ -123,7 +112,7 @@ start_all() {
     BRIDGE_PORT=8001 \
     BRIDGE_MODEL="nemotron-3-nano:30b" \
     AGENT_NAME="LocalWorker" \
-    python a2a_ollama_bridge_v2.py &
+    python a2a_ollama_bridge.py &
     WORKER_PID=$!
     sleep 2
 
@@ -140,7 +129,7 @@ start_all() {
     BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
     AGENT_NAME="LocalCoder" \
     TOOLS_PATH="/home/velvetm/Desktop" \
-    python a2a_ollama_bridge_v2.py &
+    python a2a_ollama_bridge.py &
     CODER_PID=$!
     sleep 2
 
@@ -161,6 +150,10 @@ start_all() {
     echo "  Worker: http://localhost:8001/a2a"
     echo "  Coder:  http://localhost:8002/a2a"
     echo ""
+    log_info "Push Notification Endpoints:"
+    echo "  Worker: http://localhost:8001/notifications/register"
+    echo "  Coder:  http://localhost:8002/notifications/register"
+    echo ""
 
     # Cleanup function
     cleanup() {
@@ -178,7 +171,7 @@ start_all() {
     WORKER_URLS="http://localhost:8001,http://localhost:8002" \
     MANAGER_MODEL="llama3.3:70b" \
     TOOLS_PATH="/home/velvetm/Desktop" \
-    python manager_agent_v2.py
+    python manager_agent.py
 }
 
 # Show status of all components
@@ -236,40 +229,49 @@ test_a2a() {
         }' | python -m json.tool 2>/dev/null || log_error "Test failed"
 }
 
+# Run async test
+test_async() {
+    log_info "Running async delegation test..."
+    activate_venv
+    MANAGER_MODEL="${MANAGER_MODEL:-ministral-3:14b}" python test_async.py "$@"
+}
+
 # Help text
 show_help() {
     echo "Usage: ./run.sh [command]"
     echo ""
     echo "Commands:"
-    echo "  all         Start all v2 components (worker, coder, manager)"
-    echo "  worker      Start Worker Bridge v2 only (port 8001)"
-    echo "  coder       Start Coder Bridge v2 only (port 8002)"
-    echo "  manager     Start Manager Agent v2 only (ADK-free CLI)"
+    echo "  all         Start all components (worker, coder, manager)"
+    echo "  worker      Start Worker Bridge only (port 8001)"
+    echo "  coder       Start Coder Bridge only (port 8002)"
+    echo "  manager     Start Manager Agent only (CLI)"
     echo "  status      Check status of all components"
     echo "  discover    Test A2A agent discovery"
     echo "  test        Test A2A JSON-RPC endpoint"
+    echo "  test-async  Run async delegation test"
     echo "  help        Show this help message"
     echo ""
-    echo "Legacy Commands:"
-    echo "  coder-v1    Start Coder Bridge v1 (legacy)"
-    echo "  manager-v1  Start ADK Manager (requires google-adk)"
-    echo ""
-    echo "Architecture v2 (ADK-Free):"
+    echo "Architecture (ADK-Free):"
     echo "  ┌─────────────────────────────────────────────────────┐"
-    echo "  │  Manager v2 (Ollama/llama3.3:70b)                   │"
+    echo "  │  Manager (Ollama + Webhook Server :8001)            │"
     echo "  │    │                                                │"
-    echo "  │    ├──→ Worker Bridge v2 (:8001)                    │"
+    echo "  │    ├──→ Worker Bridge (:8001)                       │"
     echo "  │    │      └──→ Ollama/nemotron-3-nano:30b           │"
     echo "  │    │                                                │"
-    echo "  │    └──→ Coder Bridge v2 (:8002)                     │"
+    echo "  │    └──→ Coder Bridge (:8002)                        │"
     echo "  │           └──→ Ollama/qwen3-coder:30b               │"
     echo "  │                 └──→ Native MCP (filesystem, etc)   │"
+    echo "  │                                                     │"
+    echo "  │  Push notifications: HMAC-signed webhooks           │"
+    echo "  │  Async delegation with turn-boundary injection      │"
     echo "  └─────────────────────────────────────────────────────┘"
     echo ""
-    echo "A2A Endpoints:"
-    echo "  GET  /.well-known/agent.json  - Agent discovery"
-    echo "  POST /a2a                     - JSON-RPC (message/send, tasks/get, etc)"
-    echo "  GET  /health                  - Health check"
+    echo "Endpoints:"
+    echo "  GET  /.well-known/agent.json   - Agent discovery"
+    echo "  POST /a2a                      - JSON-RPC (message/send, tasks/get)"
+    echo "  POST /mcp                      - MCP tools endpoint"
+    echo "  POST /notifications/register   - Webhook registration"
+    echo "  GET  /health                   - Health check"
     echo ""
     echo "Prerequisites:"
     echo "  1. Ollama running: systemctl start ollama"
@@ -287,14 +289,8 @@ case "${1:-help}" in
     coder)
         check_prereqs && start_coder_bridge
         ;;
-    coder-v1)
-        check_prereqs && start_coder_bridge_v1
-        ;;
     manager)
         check_prereqs && start_manager
-        ;;
-    manager-v1)
-        check_prereqs && start_manager_legacy
         ;;
     status)
         status
@@ -304,6 +300,10 @@ case "${1:-help}" in
         ;;
     test)
         test_a2a
+        ;;
+    test-async)
+        shift
+        check_prereqs && test_async "$@"
         ;;
     help|*)
         show_help

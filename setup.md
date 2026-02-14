@@ -1,23 +1,29 @@
-# Local A2A Agent Stack v2
+# Local A2A Agent Stack
 
 ## Overview
 
 ADK-free multi-agent system using the A2A (Agent-to-Agent) protocol for orchestration.
 All agents run locally via Ollama with native MCP tool support.
 
+**Features:**
+- Async task delegation with push notifications
+- Turn-boundary result injection
+- HMAC-signed webhook notifications
+- MCP tools via native Ollama integration
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Manager Agent v2 (Ollama/llama3.3:70b)                     │
+│  Manager Agent (Ollama + Webhook Server :8001)              │
 │    │                                                        │
-│    │  A2A Protocol (JSON-RPC)                               │
+│    │  A2A Protocol (JSON-RPC) + Push Notifications          │
 │    │                                                        │
-│    ├──→ Worker Bridge v2 (:8001)                            │
+│    ├──→ Worker Bridge (:8001)                               │
 │    │      └──→ Ollama/nemotron-3-nano:30b                   │
 │    │            └──→ General reasoning tasks                │
 │    │                                                        │
-│    └──→ Coder Bridge v2 (:8002)                             │
+│    └──→ Coder Bridge (:8002)                                │
 │           └──→ Ollama/qwen3-coder:30b                       │
 │                 └──→ Native MCP (filesystem, git, etc)      │
 └─────────────────────────────────────────────────────────────┘
@@ -50,18 +56,22 @@ pip install httpx fastapi uvicorn pydantic python-dotenv
 ./run.sh worker   # Port 8001
 ./run.sh coder    # Port 8002
 ./run.sh manager  # CLI interface
+
+# Run async test
+./run.sh test-async
 ```
 
-## A2A Endpoints
+## Endpoints
 
-Each bridge exposes standard A2A endpoints:
+Each bridge exposes:
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/.well-known/agent.json` | GET | Agent Card for discovery |
-| `/a2a` | POST | JSON-RPC endpoint |
+| `/a2a` | POST | A2A JSON-RPC endpoint |
+| `/mcp` | POST | MCP tools endpoint |
+| `/notifications/register` | POST | Webhook registration |
 | `/health` | GET | Health check |
-| `/v1/chat` | POST | Legacy chat (backwards compatible) |
 
 ## JSON-RPC Methods
 
@@ -89,113 +99,84 @@ curl -X POST http://localhost:8002/a2a \
     },
     "id": "1"
   }'
-
-# Get task status
-curl -X POST http://localhost:8002/a2a \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "tasks/get",
-    "params": {"task_id": "abc123"},
-    "id": "1"
-  }'
-
-# List tasks
-curl -X POST http://localhost:8002/a2a \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "tasks/list",
-    "params": {},
-    "id": "1"
-  }'
 ```
 
-## Agent Discovery
+## MCP Tool Calls
 
-The Manager automatically discovers workers via their Agent Cards:
+Invoke agent tools via MCP endpoint:
 
 ```bash
-# Discover agent capabilities
-curl http://localhost:8002/.well-known/agent.json
+# Async tool call (returns immediately with task_id)
+curl -X POST http://localhost:8002/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "generate_code",
+      "arguments": {
+        "description": "Write a hello world function",
+        "language": "python",
+        "_async": true
+      }
+    },
+    "id": "1"
+  }'
 ```
 
-Response includes skills that the manager uses for task delegation:
-```json
-{
-  "name": "LocalCoder",
-  "skills": [
-    {"id": "code-generation", "name": "Code Generation", "tags": ["coding"]},
-    {"id": "file-operations", "name": "File Operations", "tags": ["filesystem"]}
-  ]
-}
+## Push Notifications
+
+Register a webhook to receive task completion notifications:
+
+```bash
+# Register webhook
+curl -X POST http://localhost:8002/notifications/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhook_url": "http://localhost:8001/webhook",
+    "task_id": "abc123",
+    "events": ["task.completed", "task.failed"]
+  }'
+
+# Response includes HMAC secret for verification
+# {
+#   "subscription_id": "...",
+#   "secret": "...",
+#   "events": ["task.completed", "task.failed"]
+# }
 ```
 
-## Task States
-
-A2A task lifecycle:
-- `submitted` - Task created
-- `working` - Agent is processing
-- `input-required` - Waiting for user input
-- `completed` - Successfully finished
-- `failed` - Error occurred
-- `canceled` - Manually canceled
-
-## MCP Integration
-
-Enable MCP tools via request parameters:
-
-```json
-{
-  "message": {"role": "user", "content": "Read config.json"},
-  "tools_path": "/home/user/project",
-  "max_tool_rounds": 15
-}
-```
-
-Or explicit MCP servers:
-```json
-{
-  "mcp_servers": [
-    {"name": "fs", "command": "npx", "args": ["-y", "@anthropic/mcp-server-filesystem", "/path"]}
-  ]
-}
-```
-
-## Remote MCP via WebSocket
-
-Connect to remote MCP servers (e.g., over Tailscale):
-
-```json
-{
-  "mcp_servers": [
-    {
-      "name": "remote-tools",
-      "transport": "websocket",
-      "url": "ws://server.tailnet.ts.net:8080/mcp",
-      "headers": {"Authorization": "Bearer token"}
-    }
-  ]
-}
-```
+Webhook payloads are signed with HMAC-SHA256:
+- Header: `X-Signature: sha256=<signature>`
+- Header: `X-Subscription-Id: <id>`
+- Header: `X-Event: task.completed`
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `a2a_ollama_bridge_v2.py` | A2A-compliant bridge with JSON-RPC |
-| `manager_agent_v2.py` | ADK-free orchestrator agent |
+| `a2a_ollama_bridge.py` | A2A-compliant bridge with JSON-RPC and push notifications |
+| `manager_agent.py` | ADK-free orchestrator with async delegation |
+| `test_async.py` | Async delegation test script |
 | `run.sh` | Launch script |
-| `.env` | Configuration |
-| `a2a_ollama_bridge.py` | Legacy v1 bridge |
+| `TODO.md` | Feature roadmap |
 
-## Comparison: v1 vs v2
+## Environment Variables
 
-| Feature | v1 | v2 |
-|---------|----|----|
-| Google ADK dependency | Required | None |
-| A2A JSON-RPC | No | Yes |
-| Task management | No | Yes |
-| Skills-based routing | No | Yes |
-| Agent Card | Basic | Full spec |
-| Streaming | SSE | SSE with events |
+```bash
+# Bridge configuration
+BRIDGE_PORT=8002
+BRIDGE_MODEL=qwen3-coder:30b-a3b-q8_0
+AGENT_NAME=LocalCoder
+TOOLS_PATH=/home/user/project
+
+# Manager configuration
+MANAGER_MODEL=llama3.3:70b
+WORKER_URLS=http://localhost:8001,http://localhost:8002
+USE_PUSH_NOTIFICATIONS=true
+WEBHOOK_PORT=8001
+
+# Notification settings
+NOTIFICATION_MAX_RETRIES=5
+NOTIFICATION_TIMEOUT=10
+```

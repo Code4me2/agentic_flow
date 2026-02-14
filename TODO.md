@@ -52,25 +52,91 @@ Manager calls: LocalCoder:generate_code({..., _async: true})
 
 ---
 
+### Client-side Async Handling (Turn-Boundary Injection)
+- [x] `AsyncTaskInfo` dataclass for tracking delegated tasks
+- [x] `_pending_tasks` dict in ManagerAgent for state tracking
+- [x] `_completed_results` asyncio.Queue for injection buffer
+- [x] Background polling task (`_poll_pending_tasks`)
+- [x] Turn-boundary injection via `check_and_inject_results()`
+- [x] System prompt awareness of pending task count
+- [x] Result injection prompt builder
+- [x] Proactive announcement generation at turn boundaries
+- [x] Demo mode (`--demo`) showing async flow
+
+**Turn-Boundary Injection Flow**:
+```
+1. Manager delegates async task → returns immediately
+2. Manager responds to user: "I've delegated that..."
+3. User continues conversation (manager responds normally)
+4. Background: Polling task checks agent for completion
+5. Task completes → result queued in _completed_results
+6. Turn boundary (after response delivered):
+   - check_and_inject_results() pulls from queue
+   - Builds injection prompt with results
+   - Manager generates announcement
+   - User sees: "[Async Result] Here's what LocalCoder found..."
+```
+
+**Integration Points**:
+- For unmuted (voice): Call `check_and_inject_results()` after TTS finishes
+- For CLI: Call after each response (demonstrated in main loop)
+- `on_result_ready` callback for real-time notifications
+
+---
+
+### A2A Push Notifications
+- [x] Webhook registration endpoint on agent (`/notifications/register`)
+- [x] `pushNotificationConfig` in Agent Card
+- [x] Subscription storage with secrets (`WebhookSubscription`, `NotificationStore`)
+- [x] Event emission on task state change (`emit_notification()`)
+- [x] HMAC signature on webhook payloads (`X-Signature: sha256=...`)
+- [x] Retry with exponential backoff (1s, 2s, 4s, 8s, 16s)
+- [x] Manager webhook handler endpoint (FastAPI on port 8001)
+- [x] Signature verification on incoming webhooks
+- [x] Fallback to polling when push unavailable
+
+**Push Notification Flow**:
+```
+Manager                                   Agent
+   │                                        │
+   │── POST /notifications/register ──────► │
+   │   {webhook_url, task_id, events}       │
+   │◄─ {subscription_id, secret} ──────────│
+   │                                        │
+   │── POST /mcp tools/call (async) ──────► │
+   │◄─ {task_id: "..."} ───────────────────│
+   │                                        │
+   │   ... task executes in background ...  │
+   │                                        │
+   │◄───── POST http://manager:8001/webhook │
+   │   Headers:                             │
+   │     X-Signature: sha256=<hmac>         │
+   │     X-Subscription-Id: <id>            │
+   │     X-Event: task.completed            │
+   │   Body:                                │
+   │     {event, task_id, result, timestamp}│
+   │                                        │
+   │── Verify signature                     │
+   │── Queue result for injection           │
+   │── Announce at turn boundary            │
+```
+
+**Configuration**:
+```bash
+# Manager webhook server
+WEBHOOK_HOST=0.0.0.0
+WEBHOOK_PORT=8001
+WEBHOOK_PUBLIC_URL=http://localhost:8001
+USE_PUSH_NOTIFICATIONS=true  # Set to false to use polling
+
+# Agent notification settings
+NOTIFICATION_MAX_RETRIES=5
+NOTIFICATION_TIMEOUT=10
+```
+
+---
+
 ## Pending Features
-
-### 1. Client-side Async Handling
-**Current State**: Async delegation works at bridge level. Client needs to handle result injection.
-
-**TODO**:
-- [ ] Track pending task_ids from async tool results
-- [ ] Poll agents for completion
-- [ ] Inject results into conversation context
-- [ ] Webhook-based push notifications (alternative to polling)
-
-### 2. A2A Push Notifications
-**Current State**: `pushNotifications: false` in Agent Card
-
-**TODO**:
-- [ ] Webhook registration endpoint
-- [ ] Task state change notifications
-- [ ] Long-running task progress updates
-- [ ] Notification retry with backoff
 
 ### 3. A2A Artifacts
 **Current State**: `artifacts: []` always empty
@@ -140,39 +206,64 @@ curl http://localhost:11434/api/chat -d '{
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         User / Client                                │
+│                    (CLI, Voice/unmuted, API)                         │
 └─────────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Manager Agent v2 (localhost)                      │
-│                    Ollama/llama3.3:70b                               │
+│                    Ollama + Webhook Server (port 8001)               │
 │                                                                      │
-│  Discovers agents → Routes tasks → Aggregates results                │
+│  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
+│  │ Agent Registry  │  │ Async Task Mgmt  │  │ Result Injection   │  │
+│  │ - Discovery     │  │ - _pending_tasks │  │ - Turn boundary    │  │
+│  │ - Skill lookup  │  │ - Push/Poll      │  │ - Announcements    │  │
+│  └─────────────────┘  └──────────────────┘  └────────────────────┘  │
+│                              ▲                                       │
+│                              │ POST /webhook (push notification)     │
+│  Discovers agents → Delegates (sync/async) → Injects results         │
 └─────────────────────────────────────────────────────────────────────┘
                     │                       │
-         A2A JSON-RPC                A2A JSON-RPC
+         MCP / A2A JSON-RPC         MCP / A2A JSON-RPC
+            + webhooks                      │
                     │                       │
                     ▼                       ▼
 ┌────────────────────────┐    ┌────────────────────────────────────────┐
 │  LocalCoder (8002)     │    │  Remote Agents                         │
-│  Ollama/ministral-3    │    │                                        │
+│  Ollama/qwen3-coder    │    │                                        │
 │                        │    │  ┌──────────────────────────────────┐  │
-│  Skills:               │    │  │ CalendarAgent (solar:8085)       │  │
-│  - Code generation     │    │  │ MCP HTTP Transport               │  │
-│  - File operations     │    │  │ Skills: calendar, scheduling     │  │
-│  - Code analysis       │    │  └──────────────────────────────────┘  │
+│  Endpoints:            │    │  │ CalendarAgent (solar:8085)       │  │
+│  - /mcp (MCP tools)    │    │  │ MCP HTTP Transport               │  │
+│  - /a2a (A2A tasks)    │    │  │ Skills: calendar, scheduling     │  │
+│  - /notifications/*    │    │  └──────────────────────────────────┘  │
 │                        │    │                                        │
-│  MCP: filesystem       │    │  ┌──────────────────────────────────┐  │
-└────────────────────────┘    │  │ Future: Other remote agents      │  │
-                              │  └──────────────────────────────────┘  │
-                              └────────────────────────────────────────┘
+│  MCP Tools:            │    │                                        │
+│  - invoke              │    │                                        │
+│  - generate_code       │    │                                        │
+│  - analyze_code        │    │                                        │
+│  - answer_question     │    │                                        │
+│  - get_task_result     │    │                                        │
+│                        │    │                                        │
+│  Push: HMAC-signed     │    │                                        │
+│  webhooks on complete  │    │                                        │
+└────────────────────────┘    └────────────────────────────────────────┘
 ```
 
 ---
 
 ## Next Steps
 
-1. Enhance manager delegation robustness
-2. Add push notifications for long-running tasks
-3. Implement A2A artifacts support
-4. Add agent authentication
+1. **A2A Artifacts** - File/data outputs from tasks
+   - Artifact storage and retrieval
+   - Streaming for large files
+
+2. **Agent Authentication** - Secure agent-to-agent communication
+   - API keys or mTLS
+   - Request signing
+
+3. **Integration Testing** - Full voice flow (unmuted)
+   - STT → VAD → Manager → Async delegation → TTS → Result announcement
+
+4. **Input-Required State** - Interactive task handling
+   - Detect when agent needs user input
+   - Pause/resume task lifecycle
