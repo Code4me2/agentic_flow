@@ -2,7 +2,7 @@
 
 ## Completed Features
 
-### A2A Bridge v2
+### A2A Bridge
 - [x] Agent Card at `/.well-known/agent.json` with skills
 - [x] JSON-RPC endpoint at `/a2a`
 - [x] `message/send` - non-streaming message handling
@@ -15,7 +15,7 @@
 - [x] MCP passthrough via `tools_path`
 - [x] Legacy `/v1/chat` compatibility endpoint
 
-### Manager Agent v2 (ADK-Free)
+### Manager Agent (ADK-Free)
 - [x] Agent discovery via A2A cards
 - [x] Agent registry with skill-based lookup
 - [x] Basic delegation via JSON in responses
@@ -40,18 +40,6 @@
 - [x] `get_task_result` tool for polling async results
 - [x] `tasks/get` MCP method for task status
 
-**Async Flow**:
-```
-Manager calls: LocalCoder:generate_code({..., _async: true})
-  → Returns immediately: "Task {id} submitted"
-  → Manager acknowledges: "Working on that..."
-  → Background: Task executes
-  → Manager polls: LocalCoder:get_task_result({task_id: "..."})
-  → Returns: Result content
-```
-
----
-
 ### Client-side Async Handling (Turn-Boundary Injection)
 - [x] `AsyncTaskInfo` dataclass for tracking delegated tasks
 - [x] `_pending_tasks` dict in ManagerAgent for state tracking
@@ -61,28 +49,6 @@ Manager calls: LocalCoder:generate_code({..., _async: true})
 - [x] System prompt awareness of pending task count
 - [x] Result injection prompt builder
 - [x] Proactive announcement generation at turn boundaries
-- [x] Demo mode (`--demo`) showing async flow
-
-**Turn-Boundary Injection Flow**:
-```
-1. Manager delegates async task → returns immediately
-2. Manager responds to user: "I've delegated that..."
-3. User continues conversation (manager responds normally)
-4. Background: Polling task checks agent for completion
-5. Task completes → result queued in _completed_results
-6. Turn boundary (after response delivered):
-   - check_and_inject_results() pulls from queue
-   - Builds injection prompt with results
-   - Manager generates announcement
-   - User sees: "[Async Result] Here's what LocalCoder found..."
-```
-
-**Integration Points**:
-- For unmuted (voice): Call `check_and_inject_results()` after TTS finishes
-- For CLI: Call after each response (demonstrated in main loop)
-- `on_result_ready` callback for real-time notifications
-
----
 
 ### A2A Push Notifications
 - [x] Webhook registration endpoint on agent (`/notifications/register`)
@@ -95,113 +61,9 @@ Manager calls: LocalCoder:generate_code({..., _async: true})
 - [x] Signature verification on incoming webhooks
 - [x] Fallback to polling when push unavailable
 
-**Push Notification Flow**:
-```
-Manager                                   Agent
-   │                                        │
-   │── POST /notifications/register ──────► │
-   │   {webhook_url, task_id, events}       │
-   │◄─ {subscription_id, secret} ──────────│
-   │                                        │
-   │── POST /mcp tools/call (async) ──────► │
-   │◄─ {task_id: "..."} ───────────────────│
-   │                                        │
-   │   ... task executes in background ...  │
-   │                                        │
-   │◄───── POST http://manager:8001/webhook │
-   │   Headers:                             │
-   │     X-Signature: sha256=<hmac>         │
-   │     X-Subscription-Id: <id>            │
-   │     X-Event: task.completed            │
-   │   Body:                                │
-   │     {event, task_id, result, timestamp}│
-   │                                        │
-   │── Verify signature                     │
-   │── Queue result for injection           │
-   │── Announce at turn boundary            │
-```
-
-**Configuration**:
-```bash
-# Manager webhook server
-WEBHOOK_HOST=0.0.0.0
-WEBHOOK_PORT=8001
-WEBHOOK_PUBLIC_URL=http://localhost:8001
-USE_PUSH_NOTIFICATIONS=true  # Set to false to use polling
-
-# Agent notification settings
-NOTIFICATION_MAX_RETRIES=5
-NOTIFICATION_TIMEOUT=10
-```
-
 ---
 
-## Pending Features
-
-### 3. A2A Artifacts
-**Current State**: `artifacts: []` always empty
-
-**TODO**:
-- [ ] File artifact support (code, documents)
-- [ ] Structured data artifacts
-- [ ] Artifact streaming for large files
-- [ ] Artifact references across tasks
-
-### 4. Input-Required State
-**Current State**: Not implemented
-
-**TODO**:
-- [ ] Detect when agent needs user input
-- [ ] Pause task in `input-required` state
-- [ ] Resume with additional input
-- [ ] Timeout for input requests
-
-### 5. Multi-Agent Conversations
-**Current State**: Manager delegates to one agent at a time
-
-**TODO**:
-- [ ] Agent-to-agent direct communication
-- [ ] Shared context between agents
-- [ ] Conversation threading
-- [ ] Agent handoff protocol
-
-### 6. Security Enhancements
-**TODO**:
-- [ ] Agent authentication (mTLS, API keys)
-- [ ] Request signing
-- [ ] Rate limiting
-- [ ] Audit logging
-
----
-
-## Remote MCP Usage
-
-### Target: mcp-calendar.service on solar (Vikunja)
-
-**Test from Ollama directly**:
-```bash
-curl http://localhost:11434/api/chat -d '{
-  "model": "ministral-3:14b",
-  "messages": [{"role": "user", "content": "List my tasks"}],
-  "mcp_servers": [{
-    "name": "calendar",
-    "transport": "http",
-    "url": "http://100.119.170.128:8085/mcp"
-  }],
-  "stream": false
-}'
-```
-
-**Available tools** (via JIT discovery):
-- `calendar:list_tasks` - List tasks with filtering
-- `calendar:get_task` - Get task details by ID
-- `calendar:create_task` - Create new task
-- `calendar:update_task` - Update existing task
-- `calendar:complete_task` - Mark task as done
-
----
-
-## Architecture Diagram
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -211,7 +73,7 @@ curl http://localhost:11434/api/chat -d '{
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                    Manager Agent v2 (localhost)                      │
+│                       Manager Agent (localhost)                      │
 │                    Ollama + Webhook Server (port 8001)               │
 │                                                                      │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
@@ -251,19 +113,92 @@ curl http://localhost:11434/api/chat -d '{
 
 ---
 
+## Pending Features
+
+### A2A Artifacts
+**Current State**: `artifacts: []` always empty
+
+- [ ] File artifact support (code, documents)
+- [ ] Structured data artifacts
+- [ ] Artifact streaming for large files
+- [ ] Artifact references across tasks
+
+### Input-Required State
+**Current State**: Not implemented
+
+- [ ] Detect when agent needs user input
+- [ ] Pause task in `input-required` state
+- [ ] Resume with additional input
+- [ ] Timeout for input requests
+
+### Multi-Agent Conversations
+**Current State**: Manager delegates to one agent at a time
+
+- [ ] Agent-to-agent direct communication
+- [ ] Shared context between agents
+- [ ] Conversation threading
+- [ ] Agent handoff protocol
+
+### Security Enhancements
+- [ ] Agent authentication (mTLS, API keys)
+- [ ] Request signing
+- [ ] Rate limiting
+- [ ] Audit logging
+
+---
+
+## Quick Reference
+
+### Remote MCP (Vikunja Calendar)
+```bash
+curl http://localhost:11434/api/chat -d '{
+  "model": "ministral-3:14b",
+  "messages": [{"role": "user", "content": "List my tasks"}],
+  "mcp_servers": [{
+    "name": "calendar",
+    "transport": "http",
+    "url": "http://100.119.170.128:8085/mcp"
+  }],
+  "stream": false
+}'
+```
+
+### Async Delegation Flow
+```
+Manager calls: LocalCoder:invoke({task: "...", _async: true})
+  → Returns immediately: "Task {id} submitted"
+  → Agent sends POST /webhook on completion
+  → Manager verifies HMAC signature
+  → Result queued for turn-boundary injection
+  → Manager announces: "Here's what LocalCoder found..."
+```
+
+### Configuration
+```bash
+# Manager
+MANAGER_MODEL=llama3.3:70b
+WORKER_URLS=http://localhost:8002
+USE_PUSH_NOTIFICATIONS=true
+WEBHOOK_PORT=8001
+
+# Agent Bridge
+BRIDGE_PORT=8002
+BRIDGE_MODEL=qwen3-coder:30b-a3b-q8_0
+AGENT_NAME=LocalCoder
+NOTIFICATION_MAX_RETRIES=5
+```
+
+---
+
 ## Next Steps
 
-1. **A2A Artifacts** - File/data outputs from tasks
+1. **Integration Testing** - Full voice flow (unmuted)
+   - STT → VAD → Manager → Async delegation → TTS → Result announcement
+
+2. **A2A Artifacts** - File/data outputs from tasks
    - Artifact storage and retrieval
    - Streaming for large files
 
-2. **Agent Authentication** - Secure agent-to-agent communication
+3. **Agent Authentication** - Secure agent-to-agent communication
    - API keys or mTLS
    - Request signing
-
-3. **Integration Testing** - Full voice flow (unmuted)
-   - STT → VAD → Manager → Async delegation → TTS → Result announcement
-
-4. **Input-Required State** - Interactive task handling
-   - Detect when agent needs user input
-   - Pause/resume task lifecycle
