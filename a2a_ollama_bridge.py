@@ -52,7 +52,7 @@ logger = logging.getLogger("a2a_bridge_v2")
 OLLAMA_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
 BRIDGE_PORT = int(os.getenv("BRIDGE_PORT", "8002"))
 BRIDGE_HOST = os.getenv("BRIDGE_HOST", "0.0.0.0")
-DEFAULT_MODEL = os.getenv("BRIDGE_MODEL", "qwen3-coder:30b-a3b-q8_0")
+DEFAULT_MODEL = os.getenv("BRIDGE_MODEL", "ministral-3:14b")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "300"))
 AGENT_NAME = os.getenv("AGENT_NAME", "OllamaAgent")
 AGENT_DESCRIPTION = os.getenv("AGENT_DESCRIPTION", "Local AI agent with native MCP tool support")
@@ -1147,11 +1147,14 @@ async def execute_task_background(task_id: str, prompt: str):
     """Execute a task in the background and store result."""
     logger.info(f"Background task started: {task_id}")
 
+    # Note: Don't use tools_path to avoid nested MCP calls.
+    # Worker agents should execute tasks directly without
+    # recursively invoking other MCP tools.
     params = {
         "task_id": task_id,
         "message": {"role": "user", "content": prompt},
         "model": DEFAULT_MODEL,
-        "tools_path": DEFAULT_TOOLS_PATH,
+        "tools_path": None,  # Explicitly None to avoid nested MCP
     }
 
     try:
@@ -1242,10 +1245,12 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict, async_mode: bool
 
     else:
         # Synchronous execution (original behavior)
+        # Note: Don't use tools_path here to avoid nested MCP calls
+        # which can timeout. The worker should answer directly.
         params = {
             "message": {"role": "user", "content": prompt},
             "model": DEFAULT_MODEL,
-            "tools_path": DEFAULT_TOOLS_PATH,
+            "tools_path": None,  # Explicitly None to avoid nested MCP
         }
 
         try:
