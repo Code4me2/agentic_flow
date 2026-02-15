@@ -2,6 +2,16 @@
 
 ## Completed Features
 
+### Orchestrator (OpenAI-Compatible API)
+- [x] OpenAI-compatible `/v1/chat/completions` endpoint
+- [x] `/v1/models` endpoint listing Ollama models
+- [x] Agent discovery via `/.well-known/agent.json`
+- [x] Agent registration as MCP servers for Ollama
+- [x] MCP-based tool discovery (JIT via `mcp_discover`)
+- [x] Streaming responses with `tool_call` and `tool_result` events
+- [x] Session management for multi-turn conversations
+- [x] Generation-boundary result injection
+
 ### A2A Bridge
 - [x] Agent Card at `/.well-known/agent.json` with skills
 - [x] JSON-RPC endpoint at `/a2a`
@@ -68,47 +78,60 @@
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         User / Client                                │
-│                    (CLI, Voice/unmuted, API)                         │
+│              (unmute, curl, OpenAI-compatible apps)                  │
 └─────────────────────────────────────────────────────────────────────┘
+                                │
+                      POST /v1/chat/completions
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       Manager Agent (localhost)                      │
-│                    Ollama + Webhook Server (port 8001)               │
+│                    Orchestrator (localhost:8000)                     │
+│                      OpenAI-Compatible API                           │
 │                                                                      │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────────┐  │
-│  │ Agent Registry  │  │ Async Task Mgmt  │  │ Result Injection   │  │
-│  │ - Discovery     │  │ - _pending_tasks │  │ - Turn boundary    │  │
-│  │ - Skill lookup  │  │ - Push/Poll      │  │ - Announcements    │  │
+│  │ Agent Discovery │  │ MCP Server Mgmt  │  │ Result Injection   │  │
+│  │ - agent.json    │  │ - mcp_servers    │  │ - Generation loop  │  │
+│  │ - Registration  │  │ - JIT discovery  │  │ - Stream events    │  │
 │  └─────────────────┘  └──────────────────┘  └────────────────────┘  │
-│                              ▲                                       │
-│                              │ POST /webhook (push notification)     │
-│  Discovers agents → Delegates (sync/async) → Injects results         │
+│                                                                      │
+│  Registers agents as MCP servers → Ollama handles tool execution     │
 └─────────────────────────────────────────────────────────────────────┘
-                    │                       │
-         MCP / A2A JSON-RPC         MCP / A2A JSON-RPC
-            + webhooks                      │
-                    │                       │
-                    ▼                       ▼
-┌────────────────────────┐    ┌────────────────────────────────────────┐
-│  LocalCoder (8002)     │    │  Remote Agents                         │
-│  Ollama/qwen3-coder    │    │                                        │
-│                        │    │  ┌──────────────────────────────────┐  │
-│  Endpoints:            │    │  │ CalendarAgent (solar:8085)       │  │
-│  - /mcp (MCP tools)    │    │  │ MCP HTTP Transport               │  │
-│  - /a2a (A2A tasks)    │    │  │ Skills: calendar, scheduling     │  │
-│  - /notifications/*    │    │  └──────────────────────────────────┘  │
-│                        │    │                                        │
-│  MCP Tools:            │    │                                        │
-│  - invoke              │    │                                        │
-│  - generate_code       │    │                                        │
-│  - analyze_code        │    │                                        │
-│  - answer_question     │    │                                        │
-│  - get_task_result     │    │                                        │
-│                        │    │                                        │
-│  Push: HMAC-signed     │    │                                        │
-│  webhooks on complete  │    │                                        │
-└────────────────────────┘    └────────────────────────────────────────┘
+                                │
+                    mcp_servers: [{url, transport}]
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Ollama (MCP Fork, localhost:11434)                │
+│                                                                      │
+│  1. Receives mcp_servers config from orchestrator                    │
+│  2. Model calls mcp_discover → finds agent tools                     │
+│  3. Model calls tools → Ollama POSTs to agent /mcp                   │
+│  4. Results returned to model for next generation                    │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+                       MCP HTTP Transport
+                                │
+              ┌─────────────────┴─────────────────┐
+              ▼                                   ▼
+┌────────────────────────┐         ┌────────────────────────────────┐
+│  A2A Bridge (8001)     │         │  Remote Agents                 │
+│  ministral-3:14b       │         │                                │
+│                        │         │  ┌──────────────────────────┐  │
+│  Endpoints:            │         │  │ CalendarAgent            │  │
+│  - /mcp (MCP tools)    │         │  │ MCP HTTP Transport       │  │
+│  - /a2a (A2A tasks)    │         │  │ Skills: calendar, etc    │  │
+│  - /notifications/*    │         │  └──────────────────────────┘  │
+│                        │         │                                │
+│  MCP Tools:            │         │                                │
+│  - invoke              │         │                                │
+│  - generate_code       │         │                                │
+│  - analyze_code        │         │                                │
+│  - answer_question     │         │                                │
+│  - get_task_result     │         │                                │
+│                        │         │                                │
+│  Push: HMAC-signed     │         │                                │
+│  webhooks on complete  │         │                                │
+└────────────────────────┘         └────────────────────────────────┘
 ```
 
 ---
@@ -149,7 +172,23 @@
 
 ## Quick Reference
 
-### Remote MCP (Vikunja Calendar)
+### Orchestrator (OpenAI-Compatible)
+```bash
+# Start the stack
+./run.sh orch
+
+# Chat with agent tools
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ministral-3:14b",
+    "messages": [{"role": "user", "content": "Calculate 10 factorial"}],
+    "stream": true,
+    "agent_urls": ["http://localhost:8001"]
+  }'
+```
+
+### Direct Ollama with Remote MCP
 ```bash
 curl http://localhost:11434/api/chat -d '{
   "model": "ministral-3:14b",
@@ -163,28 +202,28 @@ curl http://localhost:11434/api/chat -d '{
 }'
 ```
 
-### Async Delegation Flow
+### MCP Tool Flow
 ```
-Manager calls: LocalCoder:invoke({task: "...", _async: true})
-  → Returns immediately: "Task {id} submitted"
-  → Agent sends POST /webhook on completion
-  → Manager verifies HMAC signature
-  → Result queued for turn-boundary injection
-  → Manager announces: "Here's what LocalCoder found..."
+1. Client → POST /v1/chat/completions with agent_urls
+2. Orchestrator discovers agents, registers as mcp_servers
+3. Ollama receives mcp_servers config
+4. Model calls mcp_discover → finds OllamaAgent:* tools
+5. Model calls OllamaAgent:answer_question
+6. Ollama POSTs to agent /mcp endpoint
+7. Agent executes, returns result
+8. Model incorporates result, generates response
 ```
 
 ### Configuration
 ```bash
-# Manager
-MANAGER_MODEL=llama3.3:70b
-WORKER_URLS=http://localhost:8002
-USE_PUSH_NOTIFICATIONS=true
-WEBHOOK_PORT=8001
+# Orchestrator
+ORCHESTRATOR_PORT=8000
+OLLAMA_API_BASE=http://localhost:11434
 
 # Agent Bridge
-BRIDGE_PORT=8002
-BRIDGE_MODEL=qwen3-coder:30b-a3b-q8_0
-AGENT_NAME=LocalCoder
+BRIDGE_PORT=8001
+BRIDGE_MODEL=ministral-3:14b
+AGENT_NAME=OllamaAgent
 NOTIFICATION_MAX_RETRIES=5
 ```
 
@@ -192,8 +231,10 @@ NOTIFICATION_MAX_RETRIES=5
 
 ## Next Steps
 
-1. **Integration Testing** - Full voice flow (unmuted)
-   - STT → VAD → Manager → Async delegation → TTS → Result announcement
+1. **Unmute Integration** - Voice interface with orchestrator
+   - Configure unmute to use orchestrator as OpenAI endpoint
+   - STT → Orchestrator → Agent delegation → TTS
+   - Handle streaming tool_call/tool_result events
 
 2. **A2A Artifacts** - File/data outputs from tasks
    - Artifact storage and retrieval
@@ -202,3 +243,8 @@ NOTIFICATION_MAX_RETRIES=5
 3. **Agent Authentication** - Secure agent-to-agent communication
    - API keys or mTLS
    - Request signing
+
+4. **Larger Model Support** - Handle longer inference times
+   - Increase Ollama MCP timeout (currently 30s)
+   - Async tool execution with polling
+   - Progress notifications for long-running tasks

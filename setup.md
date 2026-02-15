@@ -6,34 +6,66 @@ ADK-free multi-agent system using the A2A (Agent-to-Agent) protocol for orchestr
 All agents run locally via Ollama with native MCP tool support.
 
 **Features:**
+- OpenAI-compatible API (drop-in replacement for chat completions)
+- Native MCP tool discovery and execution via Ollama
 - Async task delegation with push notifications
 - Turn-boundary result injection
 - HMAC-signed webhook notifications
-- MCP tools via native Ollama integration
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Manager Agent (Ollama + Webhook Server :8001)              │
-│    │                                                        │
-│    │  A2A Protocol (JSON-RPC) + Push Notifications          │
-│    │                                                        │
-│    ├──→ Worker Bridge (:8001)                               │
-│    │      └──→ Ollama/nemotron-3-nano:30b                   │
-│    │            └──→ General reasoning tasks                │
-│    │                                                        │
-│    └──→ Coder Bridge (:8002)                                │
-│           └──→ Ollama/qwen3-coder:30b                       │
-│                 └──→ Native MCP (filesystem, git, etc)      │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Client (unmute, curl, etc)                    │
+│                              │                                   │
+│                    POST /v1/chat/completions                     │
+│                              ▼                                   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │              Orchestrator (:8000)                          │  │
+│  │         OpenAI-compatible API + MCP routing                │  │
+│  │                                                            │  │
+│  │  - Agent discovery via /.well-known/agent.json             │  │
+│  │  - Registers agents as MCP servers for Ollama              │  │
+│  │  - Streams tool_call and tool_result events                │  │
+│  │  - Generation-boundary result injection                    │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                   │
+│              mcp_servers: [{url: "http://agent/mcp"}]           │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                    Ollama (MCP Fork)                       │  │
+│  │              Native MCP with JIT Discovery                 │  │
+│  │                                                            │  │
+│  │  1. Model calls mcp_discover to find tools                 │  │
+│  │  2. Model calls agent tools (e.g., OllamaAgent:invoke)     │  │
+│  │  3. Ollama executes via HTTP to agent's /mcp endpoint      │  │
+│  │  4. Results injected back to model                         │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                   │
+│                     MCP HTTP Transport                           │
+│                              │                                   │
+│           ┌──────────────────┴──────────────────┐               │
+│           ▼                                      ▼               │
+│  ┌─────────────────────┐              ┌─────────────────────┐   │
+│  │  A2A Bridge (:8001) │              │  Remote Agents      │   │
+│  │  ministral-3:14b    │              │  (calendar, etc)    │   │
+│  │                     │              │                     │   │
+│  │  Tools:             │              │                     │   │
+│  │  - invoke           │              │                     │   │
+│  │  - generate_code    │              │                     │   │
+│  │  - analyze_code     │              │                     │   │
+│  │  - answer_question  │              │                     │   │
+│  │  - get_task_result  │              │                     │   │
+│  └─────────────────────┘              └─────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Requirements
 
 - **Ollama** with custom MCP fork (autonomous-ollama)
 - **Python 3.11+**
-- **Models**: llama3.3:70b, nemotron-3-nano:30b, qwen3-coder:30b-a3b-q8_0
+- **Models**: ministral-3:14b (default), or other Ollama models
 
 ## Installation
 
@@ -49,21 +81,57 @@ pip install httpx fastapi uvicorn pydantic python-dotenv
 ## Quick Start
 
 ```bash
-# Start all components
-./run.sh all
+# Start the orchestrator stack (recommended)
+./run.sh orch
 
-# Or start individually:
-./run.sh worker   # Port 8001
-./run.sh coder    # Port 8002
-./run.sh manager  # CLI interface
+# This starts:
+#   - A2A Bridge on :8001 (worker agent)
+#   - Orchestrator on :8000 (OpenAI-compatible API)
 
-# Run async test
-./run.sh test-async
+# Test the orchestrator
+./run.sh test-orch
+
+# Or start components individually:
+./run.sh bridge      # A2A Bridge on :8001
+./run.sh orchestrator # Orchestrator on :8000
+```
+
+## Using with OpenAI-Compatible Clients
+
+The orchestrator exposes an OpenAI-compatible API:
+
+```bash
+# Simple chat
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ministral-3:14b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+
+# With agent discovery (MCP tools)
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ministral-3:14b",
+    "messages": [{"role": "user", "content": "Use mcp_discover to find tools, then answer my question."}],
+    "stream": true,
+    "agent_urls": ["http://localhost:8001"]
+  }'
 ```
 
 ## Endpoints
 
-Each bridge exposes:
+### Orchestrator (:8000)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/chat/completions` | POST | OpenAI-compatible chat API |
+| `/v1/models` | GET | List available models |
+| `/health` | GET | Health check |
+
+### A2A Bridge (:8001)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -155,28 +223,41 @@ Webhook payloads are signed with HMAC-SHA256:
 
 | File | Description |
 |------|-------------|
-| `a2a_ollama_bridge.py` | A2A-compliant bridge with JSON-RPC and push notifications |
-| `manager_agent.py` | ADK-free orchestrator with async delegation |
-| `test_async.py` | Async delegation test script |
+| `orchestrator/` | OpenAI-compatible API service |
+| `orchestrator/api.py` | FastAPI endpoints for /v1/chat/completions |
+| `orchestrator/generation_loop.py` | MCP-aware generation with result injection |
+| `orchestrator/agent_client.py` | Agent discovery and MCP server config |
+| `orchestrator/ollama_client.py` | Ollama API client with MCP support |
+| `a2a_ollama_bridge.py` | A2A-compliant bridge with MCP tools |
 | `run.sh` | Launch script |
-| `TODO.md` | Feature roadmap |
+| `test_orchestrator.py` | Orchestrator test script |
 
 ## Environment Variables
 
 ```bash
-# Bridge configuration
-BRIDGE_PORT=8002
-BRIDGE_MODEL=qwen3-coder:30b-a3b-q8_0
-AGENT_NAME=LocalCoder
-TOOLS_PATH=/home/user/project
+# Orchestrator configuration
+ORCHESTRATOR_PORT=8000
+ORCHESTRATOR_HOST=0.0.0.0
+OLLAMA_API_BASE=http://localhost:11434
 
-# Manager configuration
-MANAGER_MODEL=llama3.3:70b
-WORKER_URLS=http://localhost:8001,http://localhost:8002
-USE_PUSH_NOTIFICATIONS=true
-WEBHOOK_PORT=8001
+# Bridge configuration
+BRIDGE_PORT=8001
+BRIDGE_MODEL=ministral-3:14b
+AGENT_NAME=OllamaAgent
+TOOLS_PATH=/home/user/project
 
 # Notification settings
 NOTIFICATION_MAX_RETRIES=5
 NOTIFICATION_TIMEOUT=10
 ```
+
+## MCP Tool Flow
+
+When a client sends a request with `agent_urls`, the orchestrator:
+
+1. Discovers agents via `/.well-known/agent.json`
+2. Registers them as MCP servers for Ollama
+3. Model calls `mcp_discover` to find available tools
+4. Model calls tools like `OllamaAgent:answer_question`
+5. Ollama executes via HTTP POST to agent's `/mcp` endpoint
+6. Results are streamed back as `mcp.tool_result` events
