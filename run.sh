@@ -73,7 +73,7 @@ start_worker_bridge() {
     python a2a_ollama_bridge.py
 }
 
-# Start the manager CLI
+# Start the manager CLI (legacy)
 start_manager() {
     log_info "Starting Manager Agent..."
     activate_venv
@@ -81,6 +81,19 @@ start_manager() {
     MANAGER_MODEL="llama3.3:70b" \
     TOOLS_PATH="/home/velvetm/Desktop" \
     python manager_agent.py
+}
+
+# Start the orchestrator (OpenAI-compatible API)
+start_orchestrator() {
+    log_info "Starting Orchestrator on port ${ORCH_PORT:-8000}..."
+    activate_venv
+    ORCH_PORT="${ORCH_PORT:-8000}" \
+    OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}" \
+    OLLAMA_MODEL="${OLLAMA_MODEL:-ministral-3:14b}" \
+    AGENT_URLS="${AGENT_URLS:-http://localhost:8001,http://localhost:8002}" \
+    WEBHOOK_HOST="${WEBHOOK_HOST:-localhost}" \
+    TOOLS_PATH="${TOOLS_PATH:-/home/velvetm/Desktop}" \
+    python -m orchestrator.main
 }
 
 # Test worker discovery
@@ -241,47 +254,143 @@ show_help() {
     echo "Usage: ./run.sh [command]"
     echo ""
     echo "Commands:"
-    echo "  all         Start all components (worker, coder, manager)"
+    echo "  orch        Start Orchestrator stack (worker, coder, orchestrator)"
+    echo "  orchestrator Start Orchestrator only (OpenAI-compatible API)"
+    echo "  all         Start legacy stack (worker, coder, manager CLI)"
     echo "  worker      Start Worker Bridge only (port 8001)"
     echo "  coder       Start Coder Bridge only (port 8002)"
-    echo "  manager     Start Manager Agent only (CLI)"
+    echo "  manager     Start Manager Agent CLI (legacy)"
     echo "  status      Check status of all components"
     echo "  discover    Test A2A agent discovery"
     echo "  test        Test A2A JSON-RPC endpoint"
-    echo "  test-async  Run async delegation test"
+    echo "  test-async  Run async delegation test (legacy manager)"
+    echo "  test-orch   Test orchestrator (add --with-agents for full test)"
     echo "  help        Show this help message"
     echo ""
-    echo "Architecture (ADK-Free):"
+    echo "Architecture (Orchestrator):"
     echo "  ┌─────────────────────────────────────────────────────┐"
-    echo "  │  Manager (Ollama + Webhook Server :8001)            │"
+    echo "  │  Client (unmute, curl, etc)                         │"
     echo "  │    │                                                │"
-    echo "  │    ├──→ Worker Bridge (:8001)                       │"
-    echo "  │    │      └──→ Ollama/nemotron-3-nano:30b           │"
-    echo "  │    │                                                │"
-    echo "  │    └──→ Coder Bridge (:8002)                        │"
-    echo "  │           └──→ Ollama/qwen3-coder:30b               │"
-    echo "  │                 └──→ Native MCP (filesystem, etc)   │"
+    echo "  │    └──→ Orchestrator (:8000)                        │"
+    echo "  │           │  OpenAI-compatible API                  │"
+    echo "  │           │  Generation loop + result injection     │"
+    echo "  │           │                                         │"
+    echo "  │           ├──→ Ollama (:11434)                      │"
+    echo "  │           │      └──→ Inference + sync MCP tools    │"
+    echo "  │           │                                         │"
+    echo "  │           ├──→ Worker Bridge (:8001)                │"
+    echo "  │           │      └──→ Async agent tasks             │"
+    echo "  │           │                                         │"
+    echo "  │           └──→ Coder Bridge (:8002)                 │"
+    echo "  │                  └──→ Async agent tasks             │"
     echo "  │                                                     │"
-    echo "  │  Push notifications: HMAC-signed webhooks           │"
-    echo "  │  Async delegation with turn-boundary injection      │"
+    echo "  │  Push notifications → Orchestrator /webhook         │"
+    echo "  │  Results injected at generation boundaries          │"
     echo "  └─────────────────────────────────────────────────────┘"
     echo ""
-    echo "Endpoints:"
-    echo "  GET  /.well-known/agent.json   - Agent discovery"
-    echo "  POST /a2a                      - JSON-RPC (message/send, tasks/get)"
-    echo "  POST /mcp                      - MCP tools endpoint"
-    echo "  POST /notifications/register   - Webhook registration"
-    echo "  GET  /health                   - Health check"
+    echo "Orchestrator Endpoints:"
+    echo "  POST /v1/chat/completions   - OpenAI-compatible chat"
+    echo "  GET  /v1/models             - List models"
+    echo "  GET  /v1/events             - SSE for IDLE push updates"
+    echo "  POST /webhook               - Push notification receiver"
+    echo "  GET  /health                - Health check"
     echo ""
-    echo "Prerequisites:"
-    echo "  1. Ollama running: systemctl start ollama"
-    echo "  2. Models: llama3.3:70b, nemotron-3-nano:30b, qwen3-coder:30b-a3b-q8_0"
+    echo "A2A Bridge Endpoints:"
+    echo "  GET  /.well-known/agent.json   - Agent discovery"
+    echo "  POST /a2a                      - JSON-RPC (tasks/send, tasks/get)"
+    echo "  POST /notifications/register   - Webhook registration"
+    echo ""
+    echo "Environment Variables:"
+    echo "  ORCH_PORT      Orchestrator port (default: 8000)"
+    echo "  OLLAMA_URL     Ollama URL (default: http://localhost:11434)"
+    echo "  OLLAMA_MODEL   Default model (default: ministral-3:14b)"
+    echo "  AGENT_URLS     Comma-separated A2A agent URLs"
+    echo "  TOOLS_PATH     MCP tools path"
+}
+
+# Start orchestrator with bridges
+start_orch_stack() {
+    check_prereqs || exit 1
+
+    echo ""
+    echo "=========================================="
+    echo "  Orchestrator Stack (OpenAI-compatible)"
+    echo "=========================================="
+    echo ""
+
+    # Start worker bridge in background
+    log_info "Starting Worker Bridge in background..."
+    activate_venv
+    BRIDGE_PORT=8001 \
+    BRIDGE_MODEL="nemotron-3-nano:30b" \
+    AGENT_NAME="LocalWorker" \
+    python a2a_ollama_bridge.py &
+    WORKER_PID=$!
+    sleep 2
+
+    if kill -0 $WORKER_PID 2>/dev/null; then
+        log_success "Worker Bridge started (PID: $WORKER_PID) on :8001"
+    else
+        log_error "Worker Bridge failed to start"
+        exit 1
+    fi
+
+    # Start coder bridge in background
+    log_info "Starting Coder Bridge in background..."
+    BRIDGE_PORT=8002 \
+    BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
+    AGENT_NAME="LocalCoder" \
+    TOOLS_PATH="/home/velvetm/Desktop" \
+    python a2a_ollama_bridge.py &
+    CODER_PID=$!
+    sleep 2
+
+    if kill -0 $CODER_PID 2>/dev/null; then
+        log_success "Coder Bridge started (PID: $CODER_PID) on :8002"
+    else
+        log_error "Coder Bridge failed to start"
+        kill $WORKER_PID 2>/dev/null
+        exit 1
+    fi
+
+    echo ""
+    log_info "A2A Agents:"
+    echo "  Worker: http://localhost:8001"
+    echo "  Coder:  http://localhost:8002"
+    echo ""
+
+    # Cleanup function
+    cleanup() {
+        echo ""
+        log_info "Shutting down..."
+        kill $WORKER_PID $CODER_PID 2>/dev/null
+        wait $WORKER_PID $CODER_PID 2>/dev/null
+        log_success "All components stopped"
+    }
+    trap cleanup EXIT INT TERM
+
+    # Start orchestrator (foreground)
+    log_info "Starting Orchestrator..."
+    echo ""
+    ORCH_PORT=8000 \
+    OLLAMA_URL="http://localhost:11434" \
+    OLLAMA_MODEL="${OLLAMA_MODEL:-ministral-3:14b}" \
+    AGENT_URLS="http://localhost:8001,http://localhost:8002" \
+    WEBHOOK_HOST="localhost" \
+    TOOLS_PATH="/home/velvetm/Desktop" \
+    python -m orchestrator.main
 }
 
 # Main command dispatcher
 case "${1:-help}" in
     all)
         start_all
+        ;;
+    orch)
+        start_orch_stack
+        ;;
+    orchestrator)
+        check_prereqs && start_orchestrator
         ;;
     worker)
         check_prereqs && start_worker_bridge
@@ -304,6 +413,11 @@ case "${1:-help}" in
     test-async)
         shift
         check_prereqs && test_async "$@"
+        ;;
+    test-orch)
+        shift
+        activate_venv
+        python test_orchestrator.py "$@"
         ;;
     help|*)
         show_help
