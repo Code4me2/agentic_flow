@@ -994,10 +994,12 @@ def get_mcp_tools() -> list[dict]:
     """
     # Define tools based on agent capabilities
     # These map to internal A2A task execution
+    # All tools run async by default - they return a task_id immediately
+    # and the caller should use get_task_result to retrieve results
     tools = [
         {
             "name": "invoke",
-            "description": f"Invoke {AGENT_NAME} to perform a task. Send a natural language request and receive the result. Set _async=true to run in background and get a task_id for later retrieval.",
+            "description": f"Invoke {AGENT_NAME} to perform a task. Returns a task_id immediately - use get_task_result to retrieve the result when ready. Continue talking to the user while the task runs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1008,10 +1010,6 @@ def get_mcp_tools() -> list[dict]:
                     "context": {
                         "type": "string",
                         "description": "Optional additional context or background information"
-                    },
-                    "_async": {
-                        "type": "boolean",
-                        "description": "If true, run task in background and return task_id immediately"
                     }
                 },
                 "required": ["task"]
@@ -1019,7 +1017,7 @@ def get_mcp_tools() -> list[dict]:
         },
         {
             "name": "generate_code",
-            "description": "Generate code based on a description. Set _async=true to run in background.",
+            "description": "Generate code based on a description. Returns a task_id immediately - use get_task_result to retrieve the generated code. Tell the user you've started working on it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1034,10 +1032,6 @@ def get_mcp_tools() -> list[dict]:
                     "context": {
                         "type": "string",
                         "description": "Optional existing code or context"
-                    },
-                    "_async": {
-                        "type": "boolean",
-                        "description": "If true, run in background and return task_id"
                     }
                 },
                 "required": ["description"]
@@ -1045,7 +1039,7 @@ def get_mcp_tools() -> list[dict]:
         },
         {
             "name": "analyze_code",
-            "description": "Analyze code for bugs, improvements, or explanations. Set _async=true to run in background.",
+            "description": "Analyze code for bugs, improvements, or explanations. Returns a task_id immediately - use get_task_result to retrieve the analysis.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1057,10 +1051,6 @@ def get_mcp_tools() -> list[dict]:
                         "type": "string",
                         "description": "Type of analysis: 'review', 'explain', 'debug', 'optimize'",
                         "enum": ["review", "explain", "debug", "optimize"]
-                    },
-                    "_async": {
-                        "type": "boolean",
-                        "description": "If true, run in background and return task_id"
                     }
                 },
                 "required": ["code"]
@@ -1068,7 +1058,7 @@ def get_mcp_tools() -> list[dict]:
         },
         {
             "name": "answer_question",
-            "description": "Answer a question or provide information on a topic. Set _async=true to run in background.",
+            "description": "Answer a question or provide information. Returns a task_id immediately - use get_task_result to retrieve the answer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1079,10 +1069,6 @@ def get_mcp_tools() -> list[dict]:
                     "context": {
                         "type": "string",
                         "description": "Optional context or background for the question"
-                    },
-                    "_async": {
-                        "type": "boolean",
-                        "description": "If true, run in background and return task_id"
                     }
                 },
                 "required": ["question"]
@@ -1090,13 +1076,13 @@ def get_mcp_tools() -> list[dict]:
         },
         {
             "name": "get_task_result",
-            "description": "Get the result of an async task. Use this to poll for results after starting an async task.",
+            "description": "Get the result of a pending task. Call this after invoking another tool to retrieve the result. If the task is still running, you'll be told to wait.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "The task ID returned from an async tool call"
+                        "description": "The task ID returned from a previous tool call"
                     }
                 },
                 "required": ["task_id"]
@@ -1241,7 +1227,7 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict, async_mode: bool
         # Start background task
         asyncio.create_task(execute_task_background(task_id, prompt))
 
-        return f"Task {task_id} submitted. Use get_task_result with this task_id to retrieve the result when complete.", task_id
+        return f"Task {task_id} is now running in the background. Continue talking to the user. Call get_task_result(task_id=\"{task_id}\") when ready to retrieve the result.", task_id
 
     else:
         # Synchronous execution (original behavior)
@@ -1342,8 +1328,13 @@ async def mcp_endpoint(request: Request):
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
 
-        # Check for async mode - can be in arguments or params
-        async_mode = arguments.pop("_async", False) or params.get("async", False)
+        # All tools are async by default (except get_task_result which is instant)
+        # This allows the manager to continue generation while tasks run
+        # The _async param can be set to False to force sync (not recommended)
+        if tool_name == "get_task_result":
+            async_mode = False  # get_task_result is always sync (it's just a status check)
+        else:
+            async_mode = not arguments.pop("_sync", False)  # Default async, opt-out with _sync
 
         logger.info(f"MCP tool call: {tool_name} async={async_mode} args={list(arguments.keys())}")
 
