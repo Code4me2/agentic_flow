@@ -94,16 +94,27 @@ class SessionManager:
                 self._task_to_session[task.task_id] = session_id
                 logger.debug(f"Added pending task {task.task_id} to session {session_id}")
 
-    async def deliver_result(self, task_id: str, result: AgentResult) -> bool:
+    async def deliver_result(
+        self,
+        task_id: str,
+        result: AgentResult,
+        session_id: Optional[str] = None,
+    ) -> bool:
         """
         Deliver result to appropriate session's queue.
 
         Called by webhook handler when push notification arrives.
+
+        If session_id is provided (from callback payload), use it directly.
+        Otherwise fall back to task_id → session_id mapping.
         """
         async with self._lock:
-            session_id = self._task_to_session.get(task_id)
+            # Use provided session_id or look up by task_id
+            if not session_id:
+                session_id = self._task_to_session.get(task_id)
+
             if not session_id or session_id not in self._sessions:
-                logger.warning(f"No session found for task {task_id}")
+                logger.warning(f"No session found for task {task_id} (session_id={session_id})")
                 return False
 
             session = self._sessions[session_id]

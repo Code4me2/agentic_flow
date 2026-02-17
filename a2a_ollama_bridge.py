@@ -255,6 +255,54 @@ async def deliver_notification(
     return False
 
 
+async def _post_callback(
+    callback_url: str,
+    task_id: str,
+    tool_name: str,
+    content: str,
+    success: bool,
+    session_id: Optional[str] = None,
+) -> bool:
+    """
+    POST task result to callback URL (orchestrator webhook).
+
+    Uses the orchestrator's expected format:
+    {
+        "task_id": "...",
+        "agent": "AgentName",
+        "tool": "tool_name",
+        "success": true/false,
+        "content": "result content",
+        "session_id": "..." (optional, for routing)
+    }
+    """
+    payload = {
+        "task_id": task_id,
+        "agent": AGENT_NAME,
+        "tool": tool_name,
+        "success": success,
+        "content": content,
+    }
+
+    if session_id:
+        payload["session_id"] = session_id
+
+    try:
+        async with httpx.AsyncClient(timeout=NOTIFICATION_TIMEOUT) as client:
+            response = await client.post(callback_url, json=payload)
+
+            if response.status_code == 200:
+                logger.info(f"Callback delivered to {callback_url} for task {task_id}")
+                return True
+
+            logger.warning(f"Callback delivery failed: {response.status_code}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Callback delivery error: {e}")
+        return False
+
+
 # =============================================================================
 # A2A Protocol Types
 # =============================================================================
@@ -1129,53 +1177,169 @@ def build_prompt_from_tool(tool_name: str, arguments: dict) -> Optional[str]:
     return None
 
 
-async def execute_task_background(task_id: str, prompt: str):
-    """Execute a task in the background and store result."""
-    logger.info(f"Background task started: {task_id}")
-
-    # Note: Don't use tools_path to avoid nested MCP calls.
-    # Worker agents should execute tasks directly without
-    # recursively invoking other MCP tools.
-    params = {
-        "task_id": task_id,
-        "message": {"role": "user", "content": prompt},
-        "model": DEFAULT_MODEL,
-        "tools_path": None,  # Explicitly None to avoid nested MCP
+# Tool definition for worker agents to send structured responses
+RESPOND_TO_MANAGER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "respond_to_manager",
+        "description": "Send your final response to the manager agent. Use this tool ONCE when you have completed the task. Include only the essential result - no reasoning or intermediate steps.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": "string",
+                    "description": "Your concise final response to the manager. Include the result, any code, or answer requested."
+                },
+                "success": {
+                    "type": "boolean",
+                    "description": "Whether the task was completed successfully",
+                    "default": True
+                }
+            },
+            "required": ["response"]
+        }
     }
+}
+
+# System prompt for worker agents
+WORKER_SYSTEM_PROMPT = """You are a worker agent executing a task for a manager agent.
+
+IMPORTANT: When you have completed the task, you MUST call the `respond_to_manager` tool with your final response.
+- Include ONLY the essential result (code, answer, etc.)
+- Do NOT include your reasoning or thought process
+- Keep the response concise and directly usable by the manager
+- Call the tool exactly ONCE when done"""
+
+
+async def execute_task_background(
+    task_id: str,
+    prompt: str,
+    tool_name: str = "invoke",
+    callback_url: Optional[str] = None,
+    session_id: Optional[str] = None,
+):
+    """
+    Execute a task in the background and store result.
+
+    Uses the respond_to_manager tool to get structured, concise responses
+    from the worker agent instead of full message content.
+
+    If callback_url is provided, POSTs result to that URL when complete.
+    """
+    logger.info(f"Background task started: {task_id} session={session_id or 'none'} (callback={callback_url is not None})")
 
     try:
-        result = await handle_message_send(params)
+        # Call Ollama directly with respond_to_manager tool
+        # This bypasses the A2A message/send flow for efficiency
+        ollama_request = {
+            "model": DEFAULT_MODEL,
+            "messages": [
+                {"role": "system", "content": WORKER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "tools": [RESPOND_TO_MANAGER_TOOL],
+            "stream": False,
+        }
 
-        # Extract text content from response
-        message = result.get("message", {})
-        content = ""
-        for part in message.get("parts", []):
-            if part.get("type") == "text":
-                content += part.get("text", "")
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE}/api/chat",
+                json=ollama_request,
+                timeout=REQUEST_TIMEOUT
+            )
 
-        # Task is already updated by handle_message_send
-        logger.info(f"Background task completed: {task_id}")
+            if response.status_code != 200:
+                raise ValueError(f"Ollama error: {response.text}")
 
-        # Emit push notification
+            data = response.json()
+            msg = data.get("message", {})
+
+            # Try to extract response from tool call first
+            content = ""
+            success = True
+            tool_calls = msg.get("tool_calls", [])
+
+            for tc in tool_calls:
+                func = tc.get("function", {})
+                if func.get("name") == "respond_to_manager":
+                    args = func.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except:
+                            args = {"response": args}
+                    content = args.get("response", "")
+                    success = args.get("success", True)
+                    logger.info(f"Worker used respond_to_manager tool (success={success})")
+                    break
+
+            # Fallback to message content if no tool call
+            if not content:
+                content = msg.get("content", "")
+                if content:
+                    logger.debug(f"Worker didn't use respond_to_manager, using message content")
+
+        # Update task state
+        await state.tasks.update(task_id, state=TaskState.COMPLETED)
+
+        # Store result in task messages for get_task_result
+        agent_message = Message(
+            role="agent",
+            parts=[Part(type=PartType.TEXT, text=content)]
+        )
+        await state.tasks.add_message(task_id, agent_message)
+
+        logger.info(f"Background task completed: {task_id} (len={len(content)})")
+
+        # Emit push notification (subscription-based)
         await emit_notification(
             task_id,
-            "task.completed",
+            "task.completed" if success else "task.failed",
             result={"content": content}
         )
+
+        # POST to callback URL if provided (orchestrator integration)
+        if callback_url:
+            await _post_callback(
+                callback_url,
+                task_id=task_id,
+                tool_name=tool_name,
+                content=content,
+                success=success,
+                session_id=session_id,
+            )
 
     except Exception as e:
         logger.error(f"Background task failed: {task_id} - {e}", exc_info=True)
         await state.tasks.update(task_id, state=TaskState.FAILED)
 
-        # Emit failure notification
+        # Emit failure notification (subscription-based)
         await emit_notification(
             task_id,
             "task.failed",
             result={"error": str(e)}
         )
 
+        # POST to callback URL if provided
+        if callback_url:
+            await _post_callback(
+                callback_url,
+                task_id=task_id,
+                tool_name=tool_name,
+                content=str(e),
+                success=False,
+                session_id=session_id,
+            )
 
-async def handle_mcp_tool_call(tool_name: str, arguments: dict, async_mode: bool = False) -> tuple[str, Optional[str]]:
+
+async def handle_mcp_tool_call(
+    tool_name: str,
+    arguments: dict,
+    async_mode: bool = False,
+    callback_url: Optional[str] = None,
+    external_task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> tuple[str, Optional[str]]:
     """
     Execute an MCP tool call by creating an internal A2A task.
 
@@ -1183,6 +1347,9 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict, async_mode: bool
         tool_name: Name of the tool to execute
         arguments: Tool arguments
         async_mode: If True, return immediately with task_id
+        callback_url: URL to POST result when task completes (orchestrator integration)
+        external_task_id: Task ID provided by orchestrator for tracking
+        session_id: Orchestrator session ID for webhook routing
 
     Returns:
         Tuple of (result_text, task_id). task_id is set for async calls.
@@ -1220,12 +1387,18 @@ async def handle_mcp_tool_call(tool_name: str, arguments: dict, async_mode: bool
         return f"Unknown tool: {tool_name}", None
 
     if async_mode:
-        # Create task and start background execution
-        task = await state.tasks.create()
+        # Use external task ID if provided (from orchestrator), otherwise generate
+        task = await state.tasks.create(task_id=external_task_id)
         task_id = task.id
 
-        # Start background task
-        asyncio.create_task(execute_task_background(task_id, prompt))
+        # Start background task with callback URL for orchestrator integration
+        asyncio.create_task(execute_task_background(
+            task_id=task_id,
+            prompt=prompt,
+            tool_name=tool_name,
+            callback_url=callback_url,
+            session_id=session_id,
+        ))
 
         return f"Task {task_id} is now running in the background. Continue talking to the user. Call get_task_result(task_id=\"{task_id}\") when ready to retrieve the result.", task_id
 
@@ -1264,14 +1437,22 @@ async def mcp_endpoint(request: Request):
     Handles MCP JSON-RPC protocol for tool discovery and execution.
     This allows other agents to discover and invoke this agent's capabilities.
 
+    Query params (for orchestrator integration):
+        session_id: Orchestrator session ID for webhook routing
+        webhook: Webhook URL to POST results to
+
     Methods:
         initialize          - Initialize MCP session
         notifications/initialized - Client initialized notification
         tools/list          - List available tools
         tools/call          - Execute a tool
     """
-    # Get or create session ID
-    session_id = request.headers.get("mcp-session-id", "")
+    # Get MCP session ID from header
+    mcp_session_id = request.headers.get("mcp-session-id", "")
+
+    # Get orchestrator integration params from query string
+    orch_session_id = request.query_params.get("session_id")
+    orch_webhook = request.query_params.get("webhook")
 
     try:
         body = await request.json()
@@ -1287,7 +1468,7 @@ async def mcp_endpoint(request: Request):
     params = body.get("params", {})
     request_id = body.get("id")  # None for notifications
 
-    logger.debug(f"MCP request: method={method} id={request_id} session={session_id[:8] if session_id else 'none'}...")
+    logger.debug(f"MCP request: method={method} id={request_id} mcp_session={mcp_session_id[:8] if mcp_session_id else 'none'} orch_session={orch_session_id or 'none'}")
 
     # Route to handler
     if method == "initialize":
@@ -1315,8 +1496,8 @@ async def mcp_endpoint(request: Request):
 
     elif method == "notifications/initialized":
         # Mark session as initialized (notification, no response)
-        if session_id and session_id in mcp_sessions:
-            mcp_sessions[session_id]["initialized"] = True
+        if mcp_session_id and mcp_session_id in mcp_sessions:
+            mcp_sessions[mcp_session_id]["initialized"] = True
         # Notifications don't get responses
         return JSONResponse(content={}, status_code=202)
 
@@ -1328,6 +1509,11 @@ async def mcp_endpoint(request: Request):
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
 
+        # Extract orchestrator integration params (from arguments or query params)
+        # Query params are set by orchestrator, arguments by direct MCP calls
+        callback_url = arguments.pop("_webhook", None) or orch_webhook
+        external_task_id = arguments.pop("_task_id", None)
+
         # All tools are async by default (except get_task_result which is instant)
         # This allows the manager to continue generation while tasks run
         # The _async param can be set to False to force sync (not recommended)
@@ -1336,10 +1522,17 @@ async def mcp_endpoint(request: Request):
         else:
             async_mode = not arguments.pop("_sync", False)  # Default async, opt-out with _sync
 
-        logger.info(f"MCP tool call: {tool_name} async={async_mode} args={list(arguments.keys())}")
+        logger.info(f"MCP tool call: {tool_name} async={async_mode} callback={callback_url is not None} session={orch_session_id or 'none'}")
 
         # Execute the tool
-        result_text, task_id = await handle_mcp_tool_call(tool_name, arguments, async_mode=async_mode)
+        result_text, task_id = await handle_mcp_tool_call(
+            tool_name,
+            arguments,
+            async_mode=async_mode,
+            callback_url=callback_url,
+            external_task_id=external_task_id,
+            session_id=orch_session_id,
+        )
 
         # Return MCP tool result format
         result = {

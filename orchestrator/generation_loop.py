@@ -97,7 +97,8 @@ async def _run_single_generation(
     model = config.ollama_model
 
     # Get MCP server configs for discovered agents
-    mcp_servers = agents.get_mcp_servers() if agents._discovered else []
+    # Pass session_id so agents can include it in webhook callbacks
+    mcp_servers = agents.get_mcp_servers(session.session_id) if agents._discovered else []
 
     if mcp_servers:
         logger.info(f"Using MCP servers: {[s['name'] for s in mcp_servers]}")

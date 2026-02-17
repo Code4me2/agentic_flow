@@ -137,20 +137,28 @@ class AgentClient:
             logger.warning(f"Failed to list tools from {url}: {e}")
             return []
 
-    def get_mcp_servers(self) -> List[Dict[str, Any]]:
+    def get_mcp_servers(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get MCP server configurations for Ollama.
 
         Returns list of MCP server configs using HTTP transport
         that Ollama can use to discover and call tools via MCP protocol.
+
+        If session_id is provided, it's included in the URL so agents
+        can include it in webhook callbacks for result routing.
         """
         servers = []
 
         for agent in self.agents.values():
+            # Include session_id in URL for webhook routing
+            url = f"{agent.url}/mcp"
+            if session_id:
+                url = f"{url}?session_id={session_id}&webhook={config.webhook_url}"
+
             server = {
                 "name": agent.name,
                 "transport": "http",
-                "url": f"{agent.url}/mcp",
+                "url": url,
             }
             servers.append(server)
 

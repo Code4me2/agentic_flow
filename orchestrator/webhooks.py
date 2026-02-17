@@ -1,6 +1,7 @@
 """Webhook endpoints for receiving push notifications from agents."""
 
 import logging
+from dataclasses import dataclass
 from fastapi import APIRouter, Request
 
 from .state import sessions
@@ -53,25 +54,38 @@ async def receive_webhook(request: Request):
     logger.debug(f"Received webhook: {body}")
 
     # Parse different formats
-    result = _parse_notification(body)
+    parsed = _parse_notification(body)
 
-    if not result:
+    if not parsed:
         logger.warning(f"Could not parse notification: {body}")
         return {"status": "error", "message": "Unknown format"}
 
-    # Deliver to session
-    delivered = await sessions.deliver_result(result.task_id, result)
+    # Deliver to session (use session_id from payload if available)
+    delivered = await sessions.deliver_result(
+        task_id=parsed.result.task_id,
+        result=parsed.result,
+        session_id=parsed.session_id,
+    )
 
     if delivered:
-        logger.info(f"Delivered result for task {result.task_id}")
-        return {"status": "ok", "task_id": result.task_id}
+        logger.info(f"Delivered result for task {parsed.result.task_id}")
+        return {"status": "ok", "task_id": parsed.result.task_id}
     else:
-        logger.warning(f"No session found for task {result.task_id}")
+        logger.warning(f"No session found for task {parsed.result.task_id}")
         return {"status": "error", "message": "Session not found"}
 
 
-def _parse_notification(body: dict) -> AgentResult | None:
-    """Parse notification into AgentResult."""
+@dataclass
+class ParsedNotification:
+    """Parsed webhook notification with routing info."""
+    result: AgentResult
+    session_id: str | None = None
+
+
+def _parse_notification(body: dict) -> ParsedNotification | None:
+    """Parse notification into AgentResult with optional session_id."""
+
+    session_id = body.get("session_id")
 
     # Try MCP JSON-RPC format
     if "jsonrpc" in body:
@@ -79,12 +93,15 @@ def _parse_notification(body: dict) -> AgentResult | None:
 
         if "error" in body:
             error = body["error"]
-            return AgentResult(
-                task_id=task_id,
-                agent_name=body.get("_agent", "Unknown"),
-                tool_name=body.get("_tool", "unknown"),
-                content=error.get("message", str(error)),
-                success=False,
+            return ParsedNotification(
+                result=AgentResult(
+                    task_id=task_id,
+                    agent_name=body.get("_agent", "Unknown"),
+                    tool_name=body.get("_tool", "unknown"),
+                    content=error.get("message", str(error)),
+                    success=False,
+                ),
+                session_id=session_id,
             )
 
         if "result" in body:
@@ -96,22 +113,28 @@ def _parse_notification(body: dict) -> AgentResult | None:
                 if item.get("type") == "text":
                     content_parts.append(item.get("text", ""))
 
-            return AgentResult(
-                task_id=task_id,
-                agent_name=body.get("_agent", "Unknown"),
-                tool_name=body.get("_tool", "unknown"),
-                content="\n".join(content_parts),
-                success=not result.get("isError", False),
+            return ParsedNotification(
+                result=AgentResult(
+                    task_id=task_id,
+                    agent_name=body.get("_agent", "Unknown"),
+                    tool_name=body.get("_tool", "unknown"),
+                    content="\n".join(content_parts),
+                    success=not result.get("isError", False),
+                ),
+                session_id=session_id,
             )
 
-    # Try custom format
+    # Try custom format (from A2A bridge)
     if "task_id" in body:
-        return AgentResult(
-            task_id=body["task_id"],
-            agent_name=body.get("agent", "Unknown"),
-            tool_name=body.get("tool", "unknown"),
-            content=body.get("content", ""),
-            success=body.get("success", True),
+        return ParsedNotification(
+            result=AgentResult(
+                task_id=body["task_id"],
+                agent_name=body.get("agent", "Unknown"),
+                tool_name=body.get("tool", "unknown"),
+                content=body.get("content", ""),
+                success=body.get("success", True),
+            ),
+            session_id=session_id,
         )
 
     return None
