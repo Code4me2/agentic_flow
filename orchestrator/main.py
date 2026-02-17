@@ -1,8 +1,9 @@
 """
 Agentic Orchestrator - Main Entry Point
 
-OpenAI-compatible API server with async MCP-based agent delegation
-and generation-boundary result injection.
+OpenAI-compatible API server with native Ollama MCP support.
+Agents are discovered via /.well-known/agent.json and registered
+as MCP servers for Ollama to handle tool discovery and execution.
 
 Usage:
     python -m orchestrator.main
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
         if agents.agents:
             logger.info(f"Discovered {len(agents.agents)} agents:")
             for name, agent in agents.agents.items():
-                logger.info(f"  - {name}: {len(agent.tools)} tools")
+                logger.info(f"  - {name}: {len(agent.tools)} MCP tools at {agent.url}")
         else:
             logger.warning("No agents discovered")
     else:
@@ -93,11 +94,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Agentic Orchestrator",
     description=(
-        "OpenAI-compatible API with async MCP-based agent delegation. "
-        "Agents are discovered via MCP tools/list and tasks submitted via "
-        "MCP tools/call. Results are injected at generation boundaries."
+        "OpenAI-compatible API with native Ollama MCP support. "
+        "Agents are discovered and registered as MCP servers. "
+        "Ollama handles tool discovery (mcp_discover) and execution. "
+        "Results are injected at generation boundaries."
     ),
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -122,7 +124,7 @@ async def health():
     for name, agent in agents.agents.items():
         agent_info[name] = {
             "url": agent.url,
-            "tools": len(agent.tools),
+            "mcp_tools": len(agent.tools),
         }
 
     return {
@@ -139,8 +141,8 @@ async def root():
     """Root endpoint with basic info."""
     return {
         "name": "Agentic Orchestrator",
-        "version": "0.2.0",
-        "protocol": "MCP + async webhooks",
+        "version": "0.3.0",
+        "protocol": "Native Ollama MCP",
         "endpoints": {
             "chat": "/v1/chat/completions",
             "models": "/v1/models",

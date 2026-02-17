@@ -62,6 +62,13 @@ DEFAULT_TOOLS_PATH = os.getenv("TOOLS_PATH", "")
 DEFAULT_MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS", "15"))
 DEFAULT_TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "30000"))
 
+# Static Tools Configuration
+# Comma-separated list of tools to expose via MCP tools/list
+# If empty or not set, all tools are exposed (JIT discovery mode)
+# Example: STATIC_TOOLS="invoke,get_task_result" for minimal footprint
+STATIC_TOOLS = os.getenv("STATIC_TOOLS", "")
+STATIC_TOOLS_LIST = [t.strip() for t in STATIC_TOOLS.split(",") if t.strip()] if STATIC_TOOLS else []
+
 # Push Notification Configuration
 NOTIFICATION_MAX_RETRIES = int(os.getenv("NOTIFICATION_MAX_RETRIES", "5"))
 NOTIFICATION_TIMEOUT = float(os.getenv("NOTIFICATION_TIMEOUT", "10"))
@@ -1039,13 +1046,16 @@ def get_mcp_tools() -> list[dict]:
     """
     Convert agent skills to MCP tool format.
     Each skill becomes an MCP tool that can be called by other agents.
+
+    If STATIC_TOOLS env var is set, only return those tools (for curated context).
+    Otherwise return all tools (full JIT discovery mode).
     """
-    # Define tools based on agent capabilities
+    # Define all available tools
     # These map to internal A2A task execution
     # All tools run async by default - they return a task_id immediately
     # and the caller should use get_task_result to retrieve results
-    tools = [
-        {
+    all_tools = {
+        "invoke": {
             "name": "invoke",
             "description": f"Invoke {AGENT_NAME} to perform a task. Returns a task_id immediately - use get_task_result to retrieve the result when ready. Continue talking to the user while the task runs.",
             "inputSchema": {
@@ -1063,7 +1073,7 @@ def get_mcp_tools() -> list[dict]:
                 "required": ["task"]
             }
         },
-        {
+        "generate_code": {
             "name": "generate_code",
             "description": "Generate code based on a description. Returns a task_id immediately - use get_task_result to retrieve the generated code. Tell the user you've started working on it.",
             "inputSchema": {
@@ -1085,7 +1095,7 @@ def get_mcp_tools() -> list[dict]:
                 "required": ["description"]
             }
         },
-        {
+        "analyze_code": {
             "name": "analyze_code",
             "description": "Analyze code for bugs, improvements, or explanations. Returns a task_id immediately - use get_task_result to retrieve the analysis.",
             "inputSchema": {
@@ -1104,7 +1114,7 @@ def get_mcp_tools() -> list[dict]:
                 "required": ["code"]
             }
         },
-        {
+        "answer_question": {
             "name": "answer_question",
             "description": "Answer a question or provide information. Returns a task_id immediately - use get_task_result to retrieve the answer.",
             "inputSchema": {
@@ -1122,7 +1132,7 @@ def get_mcp_tools() -> list[dict]:
                 "required": ["question"]
             }
         },
-        {
+        "get_task_result": {
             "name": "get_task_result",
             "description": "Get the result of a pending task. Call this after invoking another tool to retrieve the result. If the task is still running, you'll be told to wait.",
             "inputSchema": {
@@ -1136,7 +1146,15 @@ def get_mcp_tools() -> list[dict]:
                 "required": ["task_id"]
             }
         }
-    ]
+    }
+
+    # Filter to static tools if configured, otherwise return all
+    if STATIC_TOOLS_LIST:
+        tools = [all_tools[name] for name in STATIC_TOOLS_LIST if name in all_tools]
+        logger.info(f"Exposing {len(tools)} static tools: {STATIC_TOOLS_LIST}")
+    else:
+        tools = list(all_tools.values())
+
     return tools
 
 

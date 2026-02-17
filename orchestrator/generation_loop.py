@@ -1,12 +1,10 @@
 """
-Core generation loop with MCP-based agent delegation.
+Core generation loop with native Ollama MCP support.
 
-Ollama handles MCP tool discovery and execution natively:
-1. Orchestrator passes mcp_servers config to Ollama
-2. Model gets access to mcp_discover tool
-3. Model discovers agent tools via mcp_discover
-4. Model calls tools, Ollama executes via MCP
-5. Results returned in stream
+Tools are served directly by agent MCP endpoints:
+- Ollama handles tool discovery via mcp_discover
+- Ollama executes tools via MCP HTTP transport
+- Agents can filter exposed tools via STATIC_TOOLS env var
 
 For async results (via webhooks), results are injected at
 generation boundaries.
@@ -32,12 +30,14 @@ async def run_generation_loop(
 
     Yields chunks for streaming to client:
     - {"type": "content", "content": "..."} - text to stream
-    - {"type": "tool_call", "tool_call": {...}} - tool call info (from Ollama)
-    - {"type": "tool_result", "result": {...}} - tool result (from Ollama MCP)
+    - {"type": "tool_call", "tool_call": {...}} - tool call info
+    - {"type": "tool_result", "result": {...}} - tool result
     - {"type": "injection", "count": N, "agents": [...]} - async result injection
     - {"type": "done"} - loop complete
 
-    The loop continues if async results arrive at generation boundary.
+    The loop continues if:
+    - Static tool calls need processing
+    - Async results arrive at generation boundary
     """
     session.state = LoopState.GENERATING
     messages = initial_messages.copy()
@@ -49,9 +49,19 @@ async def run_generation_loop(
 
             logger.info(f"Starting generation {gen_num} for session {session.session_id}")
 
-            # Run one generation
+            # Run one generation (may loop internally for static tool calls)
+            continue_loop = False
             async for chunk in _run_single_generation(session, messages, gen_num):
-                yield chunk
+                if chunk.get("type") == "_continue":
+                    # Internal signal: static tool results injected, continue
+                    continue_loop = True
+                    messages = chunk["messages"]
+                else:
+                    yield chunk
+
+            if continue_loop:
+                # Static tool results were injected, continue to next generation
+                continue
 
             # Generation complete - check for async results
             results = sessions.drain_results(session)
@@ -89,21 +99,26 @@ async def _run_single_generation(
     gen_num: int,
 ) -> AsyncIterator[Dict[str, Any]]:
     """
-    Run a single generation with MCP servers.
+    Run a single generation with native Ollama MCP support.
 
-    Ollama handles tool discovery (via mcp_discover) and execution
-    (via MCP tools/call) natively. We just stream the results.
+    Agent MCP endpoints are passed directly to Ollama:
+    - Ollama calls mcp_discover to find available tools
+    - Ollama executes tools via HTTP to agent /mcp endpoints
+    - Agents control which tools are exposed via STATIC_TOOLS config
     """
     model = config.ollama_model
 
-    # Get MCP server configs for discovered agents
-    # Pass session_id so agents can include it in webhook callbacks
+    # Get MCP servers for all discovered agents
     mcp_servers = agents.get_mcp_servers(session.session_id) if agents._discovered else []
 
     if mcp_servers:
-        logger.info(f"Using MCP servers: {[s['name'] for s in mcp_servers]}")
+        server_names = [s['name'] for s in mcp_servers]
+        logger.info(f"Using MCP servers: {server_names}")
     else:
-        logger.warning(f"No MCP servers! agents._discovered={agents._discovered}")
+        logger.warning("No MCP servers available")
+
+    # Track state for tool call handling
+    seen_tool_call_ids: set = set()  # Dedupe duplicate tool call chunks
 
     async for chunk in ollama.chat_stream(
         model=model,
@@ -118,18 +133,34 @@ async def _run_single_generation(
             return
 
         elif chunk_type == "tool_call":
-            # Pass through tool call info for visibility
-            yield {"type": "tool_call", "tool_call": chunk["tool_call"]}
+            tool_call = chunk["tool_call"]
+            func = tool_call.get("function", {})
+            tool_name = func.get("name", "")
+            tool_call_id = tool_call.get("id", "")
+
+            # Dedupe duplicate tool call chunks (Ollama quirk)
+            if tool_call_id and tool_call_id in seen_tool_call_ids:
+                continue
+            if tool_call_id:
+                seen_tool_call_ids.add(tool_call_id)
+
+            logger.info(f"Tool call: {tool_name}")
+
+            # Pass through to client for visibility
+            # Ollama will execute via MCP and return tool_result
+            yield {"type": "tool_call", "tool_call": tool_call}
 
         elif chunk_type == "tool_result":
-            # Pass through tool result for visibility
-            yield {"type": "tool_result", "result": chunk["result"]}
+            # Tool result from Ollama MCP execution
+            result = chunk["result"]
+            logger.debug(f"Tool result: {str(result)[:100]}")
+            yield {"type": "tool_result", "result": result}
 
         elif chunk_type == "content":
             yield {"type": "content", "content": chunk["content"]}
 
         elif chunk_type == "done":
-            # Don't yield done yet - loop will check for async results first
+            # Generation complete with no static tool calls
             logger.debug(f"Generation {gen_num} complete, checking for async results")
             return
 

@@ -44,16 +44,19 @@ class OllamaClient:
         self,
         model: str,
         messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
         mcp_servers: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.7,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        Stream chat completion from Ollama with MCP support.
+        Stream chat completion from Ollama with hybrid tool support.
 
-        When mcp_servers is provided, Ollama will:
-        1. Register servers lazily (JIT)
-        2. Give model access to mcp_discover tool
-        3. Model can discover and call tools via MCP
+        Supports two modes of tool access:
+        1. Static tools (via `tools` param): Always available, no discovery needed
+        2. JIT tools (via `mcp_servers` param): Discovered via mcp_discover
+
+        Both can be used simultaneously - static tools for common operations,
+        JIT for specialized/rare tools.
 
         Yields chunks with structure:
         - {"type": "content", "content": "..."} - text content
@@ -64,7 +67,8 @@ class OllamaClient:
         Args:
             model: Model name
             messages: Conversation messages
-            mcp_servers: List of MCP server configs (name, transport, url)
+            tools: Static tool definitions (Ollama/OpenAI format)
+            mcp_servers: MCP server configs for JIT discovery
             temperature: Sampling temperature
         """
         payload = {
@@ -74,11 +78,18 @@ class OllamaClient:
             "options": {"temperature": temperature},
         }
 
+        # Add static tools (always available)
+        if tools:
+            payload["tools"] = tools
+
         # Add MCP servers for JIT tool discovery
         if mcp_servers:
             payload["mcp_servers"] = mcp_servers
 
-        logger.info(f"Starting chat stream: model={model}, messages={len(messages)}, mcp_servers={len(mcp_servers) if mcp_servers else 0}")
+        tools_count = len(tools) if tools else 0
+        mcp_count = len(mcp_servers) if mcp_servers else 0
+        logger.info(f"Starting chat stream: model={model}, messages={len(messages)}, "
+                   f"static_tools={tools_count}, mcp_servers={mcp_count}")
 
         try:
             async with self.client.stream(

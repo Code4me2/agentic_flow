@@ -2,7 +2,8 @@
 
 import os
 from dataclasses import dataclass, field
-from typing import List
+from pathlib import Path
+from typing import List, Optional
 
 
 @dataclass
@@ -17,6 +18,10 @@ class Config:
     ollama_url: str = field(default_factory=lambda: os.getenv("OLLAMA_URL", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "ministral-3:14b"))
     tools_path: str = field(default_factory=lambda: os.getenv("TOOLS_PATH", ""))
+
+    # Tools config
+    tools_config_path: Optional[Path] = field(default_factory=lambda:
+        Path(os.getenv("TOOLS_CONFIG_PATH", "")) if os.getenv("TOOLS_CONFIG_PATH") else None)
 
     # Agents
     agent_urls: List[str] = field(default_factory=lambda:
