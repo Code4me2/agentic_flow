@@ -151,8 +151,9 @@ async def _stream_with_loop(
             yield _format_sse_content(completion_id, created, model, chunk["content"])
 
         elif chunk_type == "tool_result":
-            # MCP tool result for visibility
-            yield _format_sse_event("mcp.tool_result", chunk["result"])
+            # Suppress mcp.tool_result - it's internal to orchestrator
+            # Emitting it crashes OpenAI SDK clients (no choices field)
+            pass
 
         elif chunk_type == "injection":
             # Custom event for result injection
@@ -222,7 +223,8 @@ async def _idle_event_stream(session) -> AsyncIterator[str]:
             })
 
         elif chunk_type == "tool_result":
-            yield _format_sse_event("mcp.tool_result", chunk["result"])
+            # Suppress mcp.tool_result - it's internal to orchestrator
+            pass
 
         elif chunk_type == "done":
             yield _format_sse_done(completion_id, created, model)
@@ -266,7 +268,35 @@ def _format_sse_done(id: str, created: int, model: str) -> str:
 
 
 def _format_sse_tool_call(id: str, created: int, model: str, tool_call: dict) -> str:
-    """Format tool call as SSE."""
+    """
+    Format tool call as SSE (OpenAI-compatible).
+
+    Transforms Ollama's tool_call format to OpenAI spec:
+    - arguments must be a JSON string, not a dict
+    - index belongs on tool_call, not inside function
+    """
+    # Extract function info
+    func = tool_call.get("function", {})
+
+    # Get index from function (Ollama puts it there) or default to 0
+    index = func.pop("index", 0) if isinstance(func, dict) else 0
+
+    # Ensure arguments is a JSON string, not a dict
+    arguments = func.get("arguments", {})
+    if isinstance(arguments, dict):
+        arguments = json.dumps(arguments)
+
+    # Build OpenAI-compatible tool_call structure
+    formatted_tool_call = {
+        "index": index,  # index at tool_call level per OpenAI spec
+        "id": tool_call.get("id", f"call_{id[:8]}"),
+        "type": "function",
+        "function": {
+            "name": func.get("name", ""),
+            "arguments": arguments,  # JSON string
+        }
+    }
+
     chunk = {
         "id": id,
         "object": "chat.completion.chunk",
@@ -274,7 +304,7 @@ def _format_sse_tool_call(id: str, created: int, model: str, tool_call: dict) ->
         "model": model,
         "choices": [{
             "index": 0,
-            "delta": {"tool_calls": [tool_call]},
+            "delta": {"tool_calls": [formatted_tool_call]},
             "finish_reason": None,
         }]
     }
