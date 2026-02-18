@@ -51,13 +51,25 @@ async def run_generation_loop(
 
             # Run one generation (may loop internally for static tool calls)
             continue_loop = False
+            accumulated_content = []  # Track assistant response content
+
             async for chunk in _run_single_generation(session, messages, gen_num):
                 if chunk.get("type") == "_continue":
                     # Internal signal: static tool results injected, continue
                     continue_loop = True
                     messages = chunk["messages"]
+                elif chunk.get("type") == "content":
+                    # Accumulate content for session persistence
+                    accumulated_content.append(chunk["content"])
+                    yield chunk
                 else:
                     yield chunk
+
+            # Persist assistant response to messages
+            if accumulated_content:
+                assistant_response = "".join(accumulated_content)
+                messages.append({"role": "assistant", "content": assistant_response})
+                logger.debug(f"Persisted assistant response ({len(assistant_response)} chars)")
 
             if continue_loop:
                 # Static tool results were injected, continue to next generation
