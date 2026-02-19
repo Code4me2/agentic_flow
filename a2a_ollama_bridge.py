@@ -69,6 +69,13 @@ DEFAULT_TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "30000"))
 STATIC_TOOLS = os.getenv("STATIC_TOOLS", "")
 STATIC_TOOLS_LIST = [t.strip() for t in STATIC_TOOLS.split(",") if t.strip()] if STATIC_TOOLS else []
 
+# Worker MCP Servers Configuration
+# JSON list of MCP server configs for worker agents to use during task execution.
+# When set, workers can discover and call remote MCP tools via JIT discovery.
+# Example: WORKER_MCP_SERVERS='[{"name":"calendar","transport":"http","url":"http://host:8085/mcp"}]'
+_worker_mcp_raw = os.getenv("WORKER_MCP_SERVERS", "")
+WORKER_MCP_SERVERS = json.loads(_worker_mcp_raw) if _worker_mcp_raw else []
+
 # Push Notification Configuration
 NOTIFICATION_MAX_RETRIES = int(os.getenv("NOTIFICATION_MAX_RETRIES", "5"))
 NOTIFICATION_TIMEOUT = float(os.getenv("NOTIFICATION_TIMEOUT", "10"))
@@ -1228,6 +1235,21 @@ IMPORTANT: When you have completed the task, you MUST call the `respond_to_manag
 - Keep the response concise and directly usable by the manager
 - Call the tool exactly ONCE when done"""
 
+# Extended system prompt when worker has MCP tools available
+WORKER_MCP_SYSTEM_PROMPT = """You are a worker agent executing a task for a manager agent.
+You have access to external tools via MCP servers.
+
+Steps:
+1. Call mcp_discover with pattern "*" to see ALL available tools
+2. Use the discovered tools to complete the task
+3. After getting results from tools, respond with ONLY the essential data
+
+CRITICAL RULES:
+- Always use pattern "*" with mcp_discover (not a specific keyword)
+- After discovering tools, call them to get real data — do NOT make up answers
+- Your final text response must contain ONLY the result data, no reasoning or filler
+- Be concise — the manager will present your results to the user"""
+
 
 async def execute_task_background(
     task_id: str,
@@ -1249,15 +1271,30 @@ async def execute_task_background(
     try:
         # Call Ollama directly with respond_to_manager tool
         # This bypasses the A2A message/send flow for efficiency
+        system_prompt = WORKER_MCP_SYSTEM_PROMPT if WORKER_MCP_SERVERS else WORKER_SYSTEM_PROMPT
+
         ollama_request = {
             "model": DEFAULT_MODEL,
             "messages": [
-                {"role": "system", "content": WORKER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            "tools": [RESPOND_TO_MANAGER_TOOL],
             "stream": False,
         }
+
+        # Give worker access to remote MCP servers for JIT tool discovery
+        if WORKER_MCP_SERVERS:
+            # MCP mode: Ollama handles all tool calls via MCP, so we can't
+            # mix in native tools like respond_to_manager. The worker will
+            # return its answer as message content instead.
+            ollama_request["mcp_servers"] = WORKER_MCP_SERVERS
+            ollama_request["max_tool_rounds"] = DEFAULT_MAX_TOOL_ROUNDS
+            ollama_request["jit_max_tools"] = 20  # Show all remote tools
+            logger.info(f"Worker has {len(WORKER_MCP_SERVERS)} MCP server(s): "
+                       f"{[s.get('name', '?') for s in WORKER_MCP_SERVERS]}")
+        else:
+            # No MCP servers: use respond_to_manager tool for structured output
+            ollama_request["tools"] = [RESPOND_TO_MANAGER_TOOL]
 
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             response = await client.post(
@@ -1295,7 +1332,7 @@ async def execute_task_background(
             if not content:
                 content = msg.get("content", "")
                 if content:
-                    logger.debug(f"Worker didn't use respond_to_manager, using message content")
+                    logger.info(f"Worker response (message content): {content[:500]}")
 
         # Update task state
         await state.tasks.update(task_id, state=TaskState.COMPLETED)

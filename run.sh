@@ -73,6 +73,19 @@ start_worker_bridge() {
     python a2a_ollama_bridge.py
 }
 
+# Start the A2A-Ollama bridge for calendar agent
+start_calendar_bridge() {
+    log_info "Starting Calendar Bridge on port 8003..."
+    activate_venv
+    BRIDGE_PORT=8003 \
+    BRIDGE_MODEL="${CALENDAR_MODEL:-ministral-3:14b}" \
+    AGENT_NAME="CalendarAgent" \
+    AGENT_DESCRIPTION="Calendar and task management agent. Can look up events, create tasks, and manage schedules via Vikunja." \
+    STATIC_TOOLS="invoke,get_task_result" \
+    WORKER_MCP_SERVERS='[{"name":"vikunja","transport":"http","url":"http://100.119.170.128:8085/mcp"}]' \
+    python a2a_ollama_bridge.py
+}
+
 # Start the manager CLI (legacy)
 start_manager() {
     log_info "Starting Manager Agent..."
@@ -107,6 +120,10 @@ test_discovery() {
     echo ""
     log_info "Checking Coder Bridge (8002)..."
     curl -s http://localhost:8002/.well-known/agent.json | python -m json.tool 2>/dev/null || log_warn "Coder not available"
+
+    echo ""
+    log_info "Checking Calendar Bridge (8003)..."
+    curl -s http://localhost:8003/.well-known/agent.json | python -m json.tool 2>/dev/null || log_warn "Calendar not available"
 }
 
 # Start all components
@@ -218,6 +235,14 @@ status() {
     else
         log_warn "Coder Bridge (8002): not running"
     fi
+
+    # Check Calendar Bridge
+    if curl -s http://localhost:8003/health > /dev/null 2>&1; then
+        log_success "Calendar Bridge (8003): running"
+        curl -s http://localhost:8003/health | python -c "import sys,json; d=json.load(sys.stdin); print(f\"         Tasks: {d.get('active_tasks',0)}\")" 2>/dev/null
+    else
+        log_warn "Calendar Bridge (8003): not running"
+    fi
 }
 
 # Test A2A JSON-RPC
@@ -259,6 +284,7 @@ show_help() {
     echo "  all         Start legacy stack (worker, coder, manager CLI)"
     echo "  worker      Start Worker Bridge only (port 8001)"
     echo "  coder       Start Coder Bridge only (port 8002)"
+    echo "  calendar    Start Calendar Bridge only (port 8003)"
     echo "  manager     Start Manager Agent CLI (legacy)"
     echo "  status      Check status of all components"
     echo "  discover    Test A2A agent discovery"
@@ -281,8 +307,11 @@ show_help() {
     echo "  │           ├──→ Worker Bridge (:8001)                │"
     echo "  │           │      └──→ Async agent tasks             │"
     echo "  │           │                                         │"
-    echo "  │           └──→ Coder Bridge (:8002)                 │"
-    echo "  │                  └──→ Async agent tasks             │"
+    echo "  │           ├──→ Coder Bridge (:8002)                 │"
+    echo "  │           │      └──→ Async agent tasks             │"
+    echo "  │           │                                         │"
+    echo "  │           └──→ Calendar Bridge (:8003)              │"
+    echo "  │                  └──→ Vikunja MCP (remote)          │"
     echo "  │                                                     │"
     echo "  │  Push notifications → Orchestrator /webhook         │"
     echo "  │  Results injected at generation boundaries          │"
@@ -353,18 +382,39 @@ start_orch_stack() {
         exit 1
     fi
 
+    # Start calendar bridge in background
+    log_info "Starting Calendar Bridge in background..."
+    BRIDGE_PORT=8003 \
+    BRIDGE_MODEL="${CALENDAR_MODEL:-ministral-3:14b}" \
+    AGENT_NAME="CalendarAgent" \
+    AGENT_DESCRIPTION="Calendar and task management agent. Can look up events, create tasks, and manage schedules via Vikunja." \
+    STATIC_TOOLS="invoke,get_task_result" \
+    WORKER_MCP_SERVERS='[{"name":"vikunja","transport":"http","url":"http://100.119.170.128:8085/mcp"}]' \
+    python a2a_ollama_bridge.py &
+    CALENDAR_PID=$!
+    sleep 2
+
+    if kill -0 $CALENDAR_PID 2>/dev/null; then
+        log_success "Calendar Bridge started (PID: $CALENDAR_PID) on :8003"
+    else
+        log_error "Calendar Bridge failed to start"
+        kill $WORKER_PID $CODER_PID 2>/dev/null
+        exit 1
+    fi
+
     echo ""
     log_info "A2A Agents:"
-    echo "  Worker: http://localhost:8001"
-    echo "  Coder:  http://localhost:8002"
+    echo "  Worker:   http://localhost:8001"
+    echo "  Coder:    http://localhost:8002"
+    echo "  Calendar: http://localhost:8003"
     echo ""
 
     # Cleanup function
     cleanup() {
         echo ""
         log_info "Shutting down..."
-        kill $WORKER_PID $CODER_PID 2>/dev/null
-        wait $WORKER_PID $CODER_PID 2>/dev/null
+        kill $WORKER_PID $CODER_PID $CALENDAR_PID 2>/dev/null
+        wait $WORKER_PID $CODER_PID $CALENDAR_PID 2>/dev/null
         log_success "All components stopped"
     }
     trap cleanup EXIT INT TERM
@@ -375,7 +425,7 @@ start_orch_stack() {
     ORCH_PORT=8000 \
     OLLAMA_URL="http://localhost:11434" \
     OLLAMA_MODEL="${OLLAMA_MODEL:-ministral-3:14b}" \
-    AGENT_URLS="http://localhost:8001,http://localhost:8002" \
+    AGENT_URLS="http://localhost:8001,http://localhost:8002,http://localhost:8003" \
     WEBHOOK_HOST="localhost" \
     TOOLS_PATH="/home/velvetm/Desktop" \
     python -m orchestrator.main
@@ -397,6 +447,9 @@ case "${1:-help}" in
         ;;
     coder)
         check_prereqs && start_coder_bridge
+        ;;
+    calendar)
+        check_prereqs && start_calendar_bridge
         ;;
     manager)
         check_prereqs && start_manager
