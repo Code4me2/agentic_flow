@@ -52,6 +52,8 @@ async def run_generation_loop(
             # Run one generation (may loop internally for static tool calls)
             continue_loop = False
             accumulated_content = []  # Track assistant response content
+            accumulated_tool_calls = []  # Track tool calls
+            accumulated_tool_results = []  # Track tool results
 
             async for chunk in _run_single_generation(session, messages, gen_num):
                 if chunk.get("type") == "_continue":
@@ -62,14 +64,55 @@ async def run_generation_loop(
                     # Accumulate content for session persistence
                     accumulated_content.append(chunk["content"])
                     yield chunk
+                elif chunk.get("type") == "tool_call":
+                    # Accumulate tool calls for session persistence
+                    tc = chunk["tool_call"]
+                    accumulated_tool_calls.append({
+                        "id": tc.get("id", ""),
+                        "type": "function",
+                        "function": tc.get("function", {}),
+                    })
+                    yield chunk
+                elif chunk.get("type") == "tool_result":
+                    # Accumulate tool results for session persistence
+                    result = chunk["result"]
+                    accumulated_tool_results.append(result)
+                    yield chunk
                 else:
                     yield chunk
 
-            # Persist assistant response to messages
-            if accumulated_content:
-                assistant_response = "".join(accumulated_content)
-                messages.append({"role": "assistant", "content": assistant_response})
-                logger.debug(f"Persisted assistant response ({len(assistant_response)} chars)")
+            # Persist assistant message (with content and/or tool calls)
+            if accumulated_content or accumulated_tool_calls:
+                assistant_msg = {"role": "assistant"}
+                if accumulated_content:
+                    assistant_msg["content"] = "".join(accumulated_content)
+                if accumulated_tool_calls:
+                    assistant_msg["tool_calls"] = accumulated_tool_calls
+                messages.append(assistant_msg)
+                logger.debug(f"Persisted assistant message (content={len(accumulated_content)} chunks, tool_calls={len(accumulated_tool_calls)})")
+
+            # Persist tool results as separate messages
+            for i, result in enumerate(accumulated_tool_results):
+                tool_call_id = accumulated_tool_calls[i]["id"] if i < len(accumulated_tool_calls) else ""
+                # Format result content
+                if isinstance(result, dict):
+                    content = result.get("content", str(result))
+                    if isinstance(content, list):
+                        # MCP format: [{"type": "text", "text": "..."}]
+                        content = "\n".join(
+                            item.get("text", str(item))
+                            for item in content
+                            if isinstance(item, dict)
+                        )
+                else:
+                    content = str(result)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                })
+            if accumulated_tool_results:
+                logger.debug(f"Persisted {len(accumulated_tool_results)} tool results")
 
             if continue_loop:
                 # Static tool results were injected, continue to next generation
@@ -136,6 +179,7 @@ async def _run_single_generation(
         model=model,
         messages=messages,
         mcp_servers=mcp_servers if mcp_servers else None,
+        session_id=session.session_id,
     ):
         chunk_type = chunk.get("type")
 

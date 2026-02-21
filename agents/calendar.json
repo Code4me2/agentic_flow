@@ -1,0 +1,20 @@
+{
+  "name": "CalendarAgent",
+  "description": "Calendar and task management agent. Checks schedules, creates/updates/completes tasks, and manages reminders via Vikunja.",
+  "skills": [
+    {
+      "id": "calendar-management",
+      "name": "Calendar Management",
+      "description": "Look up events, check schedules, and manage calendar entries",
+      "tags": ["calendar", "events", "scheduling"],
+      "examples": ["What's on my calendar today?", "Do I have meetings this week?"]
+    },
+    {
+      "id": "task-management",
+      "name": "Task Management",
+      "description": "Create, update, complete, and delete tasks and to-do lists",
+      "tags": ["tasks", "todo", "vikunja"],
+      "examples": ["Create a task to review the PR", "What tasks are due this week?"]
+    }
+  ]
+}

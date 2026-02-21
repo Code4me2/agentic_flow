@@ -1,0 +1,20 @@
+{
+  "name": "LocalCoder",
+  "description": "Code generation agent with filesystem access via native MCP",
+  "skills": [
+    {
+      "id": "code-generation",
+      "name": "Code Generation",
+      "description": "Generate, modify, and explain code in multiple languages",
+      "tags": ["coding", "programming"],
+      "examples": ["Write a Python function to parse JSON"]
+    },
+    {
+      "id": "code-analysis",
+      "name": "Code Analysis",
+      "description": "Analyze codebases, find patterns, and suggest improvements",
+      "tags": ["analysis", "review"],
+      "examples": ["What does this function do?"]
+    }
+  ]
+}

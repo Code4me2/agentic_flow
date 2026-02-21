@@ -1,0 +1,13 @@
+{
+  "name": "LocalWorker",
+  "description": "General purpose reasoning and task execution agent",
+  "skills": [
+    {
+      "id": "general-reasoning",
+      "name": "General Reasoning",
+      "description": "Answer questions, reason through problems, and provide information",
+      "tags": ["reasoning", "qa"],
+      "examples": ["Explain how X works", "Compare these approaches"]
+    }
+  ]
+}

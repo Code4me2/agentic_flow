@@ -56,8 +56,7 @@ start_coder_bridge() {
     activate_venv
     BRIDGE_PORT=8002 \
     BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
-    AGENT_NAME="LocalCoder" \
-    AGENT_DESCRIPTION="Code generation agent with filesystem access via native MCP" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/coder.json" \
     TOOLS_PATH="/home/velvetm/Desktop" \
     python a2a_ollama_bridge.py
 }
@@ -68,8 +67,7 @@ start_worker_bridge() {
     activate_venv
     BRIDGE_PORT=8001 \
     BRIDGE_MODEL="nemotron-3-nano:30b" \
-    AGENT_NAME="LocalWorker" \
-    AGENT_DESCRIPTION="General purpose reasoning and task execution agent" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/worker.json" \
     python a2a_ollama_bridge.py
 }
 
@@ -79,8 +77,7 @@ start_calendar_bridge() {
     activate_venv
     BRIDGE_PORT=8003 \
     BRIDGE_MODEL="${CALENDAR_MODEL:-ministral-3:14b}" \
-    AGENT_NAME="CalendarAgent" \
-    AGENT_DESCRIPTION="Calendar and task management agent. Can look up events, create tasks, and manage schedules via Vikunja." \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/calendar.json" \
     STATIC_TOOLS="invoke,get_task_result" \
     WORKER_MCP_SERVERS='[{"name":"vikunja","transport":"http","url":"http://100.119.170.128:8085/mcp"}]' \
     python a2a_ollama_bridge.py
@@ -141,7 +138,7 @@ start_all() {
     activate_venv
     BRIDGE_PORT=8001 \
     BRIDGE_MODEL="nemotron-3-nano:30b" \
-    AGENT_NAME="LocalWorker" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/worker.json" \
     python a2a_ollama_bridge.py &
     WORKER_PID=$!
     sleep 2
@@ -157,7 +154,7 @@ start_all() {
     log_info "Starting Coder Bridge in background..."
     BRIDGE_PORT=8002 \
     BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
-    AGENT_NAME="LocalCoder" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/coder.json" \
     TOOLS_PATH="/home/velvetm/Desktop" \
     python a2a_ollama_bridge.py &
     CODER_PID=$!
@@ -352,7 +349,7 @@ start_orch_stack() {
     activate_venv
     BRIDGE_PORT=8001 \
     BRIDGE_MODEL="nemotron-3-nano:30b" \
-    AGENT_NAME="LocalWorker" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/worker.json" \
     python a2a_ollama_bridge.py &
     WORKER_PID=$!
     sleep 2
@@ -368,7 +365,7 @@ start_orch_stack() {
     log_info "Starting Coder Bridge in background..."
     BRIDGE_PORT=8002 \
     BRIDGE_MODEL="qwen3-coder:30b-a3b-q8_0" \
-    AGENT_NAME="LocalCoder" \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/coder.json" \
     TOOLS_PATH="/home/velvetm/Desktop" \
     python a2a_ollama_bridge.py &
     CODER_PID=$!
@@ -386,8 +383,7 @@ start_orch_stack() {
     log_info "Starting Calendar Bridge in background..."
     BRIDGE_PORT=8003 \
     BRIDGE_MODEL="${CALENDAR_MODEL:-ministral-3:14b}" \
-    AGENT_NAME="CalendarAgent" \
-    AGENT_DESCRIPTION="Calendar and task management agent. Can look up events, create tasks, and manage schedules via Vikunja." \
+    AGENT_CONFIG="$SCRIPT_DIR/agents/calendar.json" \
     STATIC_TOOLS="invoke,get_task_result" \
     WORKER_MCP_SERVERS='[{"name":"vikunja","transport":"http","url":"http://100.119.170.128:8085/mcp"}]' \
     python a2a_ollama_bridge.py &

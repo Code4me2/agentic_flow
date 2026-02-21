@@ -69,6 +69,19 @@ DEFAULT_TOOL_TIMEOUT = int(os.getenv("TOOL_TIMEOUT", "30000"))
 STATIC_TOOLS = os.getenv("STATIC_TOOLS", "")
 STATIC_TOOLS_LIST = [t.strip() for t in STATIC_TOOLS.split(",") if t.strip()] if STATIC_TOOLS else []
 
+# Agent Config File (optional — overrides env vars for name/description/skills)
+AGENT_CONFIG_PATH = os.getenv("AGENT_CONFIG", "")
+_agent_config = None
+if AGENT_CONFIG_PATH:
+    try:
+        with open(AGENT_CONFIG_PATH) as f:
+            _agent_config = json.load(f)
+        AGENT_NAME = _agent_config.get("name", AGENT_NAME)
+        AGENT_DESCRIPTION = _agent_config.get("description", AGENT_DESCRIPTION)
+        logger.info(f"Loaded agent config from {AGENT_CONFIG_PATH}")
+    except Exception as e:
+        logger.warning(f"Failed to load agent config: {e}")
+
 # Worker MCP Servers Configuration
 # JSON list of MCP server configs for worker agents to use during task execution.
 # When set, workers can discover and call remote MCP tools via JIT discovery.
@@ -542,21 +555,20 @@ async def agent_card():
     """A2A Agent Card for discovery"""
     base_url = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}"
 
-    return AgentCard(
-        name=AGENT_NAME,
-        description=AGENT_DESCRIPTION,
-        url=base_url,
-        version="2.0.0",
-        capabilities={
-            "streaming": True,
-            "pushNotifications": True,
-            "pushNotificationConfig": {
-                "endpoint": f"{base_url}/notifications/register",
-                "events": ["task.completed", "task.failed", "task.progress"],
-            },
-            "stateTransitionHistory": True,
-        },
-        skills=[
+    # Build skills from config file or fall back to defaults
+    if _agent_config and "skills" in _agent_config:
+        skills = [
+            Skill(
+                id=s["id"],
+                name=s["name"],
+                description=s["description"],
+                tags=s.get("tags", []),
+                examples=s.get("examples", []),
+            )
+            for s in _agent_config["skills"]
+        ]
+    else:
+        skills = [
             Skill(
                 id="code-generation",
                 name="Code Generation",
@@ -587,7 +599,23 @@ async def agent_card():
                     "What does this function do?",
                 ]
             ),
-        ],
+        ]
+
+    return AgentCard(
+        name=AGENT_NAME,
+        description=AGENT_DESCRIPTION,
+        url=base_url,
+        version="2.0.0",
+        capabilities={
+            "streaming": True,
+            "pushNotifications": True,
+            "pushNotificationConfig": {
+                "endpoint": f"{base_url}/notifications/register",
+                "events": ["task.completed", "task.failed", "task.progress"],
+            },
+            "stateTransitionHistory": True,
+        },
+        skills=skills,
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         provider={
@@ -1064,7 +1092,7 @@ def get_mcp_tools() -> list[dict]:
     all_tools = {
         "invoke": {
             "name": "invoke",
-            "description": f"Invoke {AGENT_NAME} to perform a task. Returns a task_id immediately - use get_task_result to retrieve the result when ready. Continue talking to the user while the task runs.",
+            "description": f"Invoke {AGENT_NAME} ({AGENT_DESCRIPTION}) to perform a task. Returns a task_id immediately - use get_task_result to retrieve the result when ready. Continue talking to the user while the task runs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

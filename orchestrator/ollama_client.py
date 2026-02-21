@@ -47,6 +47,7 @@ class OllamaClient:
         tools: Optional[List[Dict[str, Any]]] = None,
         mcp_servers: Optional[List[Dict[str, Any]]] = None,
         temperature: float = 0.7,
+        session_id: Optional[str] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
         Stream chat completion from Ollama with hybrid tool support.
@@ -70,6 +71,7 @@ class OllamaClient:
             tools: Static tool definitions (Ollama/OpenAI format)
             mcp_servers: MCP server configs for JIT discovery
             temperature: Sampling temperature
+            session_id: Session ID for MCP state persistence
         """
         payload = {
             "model": model,
@@ -85,6 +87,10 @@ class OllamaClient:
         # Add MCP servers for JIT tool discovery
         if mcp_servers:
             payload["mcp_servers"] = mcp_servers
+
+        # Add session ID for MCP state persistence across requests
+        if session_id:
+            payload["session_id"] = session_id
 
         tools_count = len(tools) if tools else 0
         mcp_count = len(mcp_servers) if mcp_servers else 0

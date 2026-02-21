@@ -83,14 +83,47 @@ async def chat_completions(request: Request):
     # Get or create session
     session = await sessions.get_or_create(session_id)
 
-    # Update session messages
-    session.messages = messages.copy()
+    # Merge client messages with server state
+    # Server state includes tool_call/tool_result messages that client doesn't track.
+    # Compare USER message counts (both sides agree on user messages) rather than
+    # total counts, which diverge when the server has extra tool context.
+    if session.messages and len(session.messages) > 0:
+        server_user_count = sum(1 for m in session.messages if m.get("role") == "user")
+        client_user_count = sum(1 for m in messages if m.get("role") == "user")
 
-    logger.info(f"Chat completion: session={session_id}, messages={len(messages)}, stream={stream}")
+        if client_user_count > server_user_count:
+            # Client has new user messages - extract and append them
+            client_user_msgs = [m for m in messages if m.get("role") == "user"]
+            new_user_msgs = client_user_msgs[server_user_count:]
+            session.messages.extend(new_user_msgs)
+            logger.debug(f"Appended {len(new_user_msgs)} new user messages "
+                        f"(server: {server_user_count} user / {len(session.messages)} total)")
+        elif client_user_count == server_user_count:
+            # No new user messages - server state is current (has tool context)
+            logger.debug(f"Server state current ({len(session.messages)} messages, "
+                        f"{server_user_count} user msgs)")
+        else:
+            # Client has fewer user messages - reset to client state
+            logger.warning(f"Client has fewer user messages ({client_user_count}) "
+                          f"than server ({server_user_count}), resetting")
+            session.messages = messages.copy()
+    else:
+        # New session - use client messages
+        session.messages = messages.copy()
+
+    logger.info(f"Chat completion: session={session_id}, messages={len(session.messages)}, stream={stream}")
+
+    # Build system prompt from discovered agents and inject at front
+    system_prompt = agents.build_system_prompt()
+    gen_messages = session.messages.copy()
+    if gen_messages and gen_messages[0].get("role") == "system":
+        gen_messages[0] = {"role": "system", "content": system_prompt}
+    else:
+        gen_messages.insert(0, {"role": "system", "content": system_prompt})
 
     if stream:
         return StreamingResponse(
-            _stream_with_loop(session, messages, model),
+            _stream_with_loop(session, gen_messages, model),
             media_type="text/event-stream",
             headers={
                 "X-Session-ID": session_id,
@@ -102,7 +135,7 @@ async def chat_completions(request: Request):
         # Non-streaming: collect all output
         content_parts = []
 
-        async for chunk in _stream_with_loop(session, messages, model):
+        async for chunk in _stream_with_loop(session, gen_messages, model):
             # Parse SSE data
             if chunk.startswith("data: "):
                 data_str = chunk[6:].strip()

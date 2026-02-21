@@ -12,6 +12,13 @@ from .config import config
 
 logger = logging.getLogger(__name__)
 
+MANAGER_BASE_PROMPT = (
+    "You are a helpful voice assistant that coordinates specialized agents.\n"
+    "Keep responses conversational and concise — the user is listening, not reading.\n"
+    "Do not use markdown formatting, bullet lists, or code blocks in responses.\n"
+    "When delegating to an agent, briefly tell the user what you're doing."
+)
+
 
 @dataclass
 class AgentCard:
@@ -19,6 +26,7 @@ class AgentCard:
     name: str
     url: str
     description: str
+    skills: List[Dict[str, Any]] = field(default_factory=list)
     tools: List[Dict[str, Any]] = field(default_factory=list)
     push_notifications: bool = True
 
@@ -78,21 +86,22 @@ class AgentClient:
                 continue
 
             try:
-                # First try to get agent info from A2A endpoint
-                agent_name = await self._get_agent_name(url)
+                # Get agent metadata from A2A agent card
+                info = await self._get_agent_info(url)
 
-                # Then discover tools via MCP
+                # Discover tools via MCP
                 tools = await self._mcp_list_tools(url)
 
                 card = AgentCard(
-                    name=agent_name,
+                    name=info["name"],
                     url=url,
-                    description=f"Agent at {url}",
+                    description=info["description"],
+                    skills=info["skills"],
                     tools=tools,
                 )
 
                 self.agents[card.name] = card
-                logger.info(f"Discovered agent: {card.name} at {url} with {len(tools)} tools")
+                logger.info(f"Discovered agent: {card.name} ({card.description}) at {url} with {len(tools)} tools")
 
             except Exception as e:
                 logger.warning(f"Failed to discover agent at {url}: {e}")
@@ -100,15 +109,24 @@ class AgentClient:
         self._discovered = True
         logger.info(f"Agent discovery complete: {len(self.agents)} agents found")
 
-    async def _get_agent_name(self, url: str) -> str:
-        """Get agent name from A2A endpoint."""
+    async def _get_agent_info(self, url: str) -> Dict[str, Any]:
+        """Get agent metadata from A2A agent card endpoint."""
+        fallback = {
+            "name": f"Agent_{url.split(':')[-1]}",
+            "description": f"Agent at {url}",
+            "skills": [],
+        }
         try:
             resp = await self.client.get(f"{url}/.well-known/agent.json")
             resp.raise_for_status()
             data = resp.json()
-            return data.get("name", f"Agent_{url.split(':')[-1]}")
-        except:
-            return f"Agent_{url.split(':')[-1]}"
+            return {
+                "name": data.get("name", fallback["name"]),
+                "description": data.get("description", fallback["description"]),
+                "skills": data.get("skills", []),
+            }
+        except Exception:
+            return fallback
 
     async def _mcp_list_tools(self, url: str) -> List[Dict[str, Any]]:
         """
@@ -136,6 +154,30 @@ class AgentClient:
         except Exception as e:
             logger.warning(f"Failed to list tools from {url}: {e}")
             return []
+
+    def build_system_prompt(self) -> str:
+        """
+        Build system prompt with agent roster for the manager model.
+
+        Returns a prompt containing behavior instructions and a
+        dynamically assembled agent roster from discovered agent cards.
+        """
+        parts = [MANAGER_BASE_PROMPT]
+
+        if self.agents:
+            parts.append("\nAvailable agents:")
+            for name, agent in self.agents.items():
+                parts.append(f"\n- {name}: {agent.description}")
+                for skill in agent.skills:
+                    s_desc = skill.get("description", "")
+                    if s_desc:
+                        parts.append(f"  - {skill.get('name', '')}: {s_desc}")
+            parts.append(
+                "\nUse the appropriate agent's invoke tool based on what the user needs. "
+                "Each invoke runs asynchronously — tell the user you're working on it."
+            )
+
+        return "\n".join(parts)
 
     def get_mcp_servers(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
